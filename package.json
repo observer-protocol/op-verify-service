@@ -1,0 +1,27 @@
+{
+  "name": "@observer-protocol/op-verify-service",
+  "version": "0.1.0",
+  "description": "Hosted one-call verification of Observer-issued agent identity, mandate validity, and in-scope checks. Thin composition over the public @observer-protocol/policy-engine; signed, fail-closed responses.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" } },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "pretest": "tsup",
+    "test": "node --test test/*.test.mjs",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@observer-protocol/policy-engine": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}
