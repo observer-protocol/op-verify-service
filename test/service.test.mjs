@@ -142,6 +142,44 @@ test('context: opaque correlation echoed verbatim onto allow AND deny outcomes',
   assert.equal(none.context, undefined, 'absent when the caller sends no context');
 });
 
+test('fail-closed default: empty token list denies all AND announces itself at boot', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opverify-noauth-'));
+  const skp = generateKeyPairSync('ed25519');
+  const sPub = Buffer.from(skp.publicKey.export({ format: 'jwk' }).x, 'base64url');
+  const sDid = 'did:key:z' + b58(Buffer.concat([Buffer.from([0xed, 0x01]), sPub]));
+  const keyPath = join(dir, 'signing.pem');
+  writeFileSync(keyPath, skp.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+
+  process.env.OP_VERIFY_SIGNING_KEY_PATH = keyPath;
+  process.env.OP_VERIFY_SIGNING_VM = `${sDid}#${sDid.slice('did:key:'.length)}`;
+  process.env.OP_VERIFY_ISSUER_ALLOWLIST = 'did:web:observerprotocol.org';
+  process.env.OP_VERIFY_SCHEMA_ALLOWLIST = SCHEMA;
+  delete process.env.OP_VERIFY_BEARER_TOKENS; // the misconfiguration we care about
+  process.env.OP_VERIFY_CACHE_DIR = join(dir, 'cache');
+  process.env.PORT = '18092';
+
+  const warnings = [];
+  const origWarn = console.warn;
+  console.warn = (...a) => warnings.push(a.join(' '));
+  let server;
+  try {
+    const { main } = await import('../dist/server.js');
+    server = await main();
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.ok(warnings.some((w) => /no bearer tokens configured/i.test(w) && /401/.test(w)), 'boot must warn loudly when no tokens are configured');
+
+  const url = 'http://127.0.0.1:18092/v1/verify';
+  const body = JSON.stringify({ agentDid: 'did:web:x', mandate: {} });
+  // No configuration grants access: arbitrary token, empty bearer, no header all 401.
+  for (const headers of [{ authorization: 'Bearer anything-at-all' }, { authorization: 'Bearer ' }, {}]) {
+    const res = await fetch(url, { method: 'POST', body, headers });
+    assert.equal(res.status, 401, `empty token list must deny (headers=${JSON.stringify(headers)})`);
+  }
+  server.close();
+});
+
 test('HTTP surface: auth, signed response, proof verifies against the signer DID', async () => {
   const principal = makeAgent();
   const agent = makeAgent();

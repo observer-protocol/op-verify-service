@@ -58,6 +58,10 @@ Stateless by construction, and verifiable on the box:
 - The mandate touches disk only as a `0600` file inside the service's `PrivateTmp` namespace, solely to feed the engine's file-based `verifyCredential`, and is removed in a `finally` before responding. It never persists; `PrivateTmp` wipes it on restart regardless.
 - The only file the service persists is a cache of **public** DID documents / status lists under `OP_VERIFY_CACHE_DIR`.
 
+## Access is fail-closed by default
+
+No configuration grants access when credentials are absent. If `OP_VERIFY_BEARER_TOKENS` is empty or unset, the token list is empty and **every** `/v1/verify` request returns `401` — an arbitrary token, an empty bearer, and a missing `Authorization` header all deny. There is no code path where "no tokens configured" authenticates a caller: `tokenOk` is `tokens.some(...)`, which is `false` over an empty list. Verified in code and by live probe. A deployment with no tokens boots healthy and denies all, and emits a startup warning saying so — a lost env file is visible at boot rather than surfacing later as a partner's mystery `401` while `/health` is green.
+
 ## Identity, precisely
 
 The identity component asserts: the DID resolves publicly and the presented mandate is cryptographically bound to it. Proof of *live key control* is the separate challenge-response flow on the main API (`/observer/challenge` + `/observer/verify-agent`); a relying party that needs it can require both.

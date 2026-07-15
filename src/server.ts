@@ -125,6 +125,16 @@ export async function main(): Promise<Server> {
   const host = process.env.HOST ?? '127.0.0.1';
   await new Promise<void>((resolve) => server.listen(port, host, resolve));
   console.log(`op-verify-service on ${host}:${port} signing as ${signer.verificationMethod}`);
+  if (tokens.length === 0) {
+    // Loud on purpose: a deployment with no tokens is healthy and fail-closed,
+    // but it denies every real caller. Without this line a lost/absent env file
+    // looks like a partner-side 401 while /health stays green. Announce it here.
+    console.warn(
+      'WARNING: no bearer tokens configured (OP_VERIFY_BEARER_TOKENS empty) — ' +
+      'ALL /v1/verify requests will 401. This is fail-closed, not an outage; ' +
+      '/health stays green. If a partner is provisioned, the env file is missing.',
+    );
+  }
   return server;
 }
 
