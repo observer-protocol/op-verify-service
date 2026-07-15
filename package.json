@@ -1,6 +1,6 @@
 {
   "name": "@observer-protocol/op-verify-service",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hosted one-call verification of Observer-issued agent identity, mandate validity, and in-scope checks. Thin composition over the public @observer-protocol/policy-engine; signed, fail-closed responses.",
   "license": "MIT",
   "type": "module",

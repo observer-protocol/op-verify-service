@@ -63,7 +63,6 @@ function coreCfg(principal, extra = {}) {
     issuerAllowlist: [principal.did],
     schemaAllowlist: [SCHEMA],
     cacheDir: join(dir, 'cache'),
-    auditLog: join(dir, 'audit.jsonl'),
     nowMs: Date.parse('2026-07-10T12:00:00Z'),
     ...extra,
   };
@@ -126,6 +125,23 @@ test('fail-closed: expired mandate, unlisted issuer, tampered credential, legacy
   assert.match(badCur.scope.reason, /minor-unit exponent/);
 });
 
+test('context: opaque correlation echoed verbatim onto allow AND deny outcomes', async () => {
+  const principal = makeAgent();
+  const agent = makeAgent();
+  const cfg = coreCfg(principal);
+  const ctx = { correlationId: 'arbis_run_abc123', fingerprint: 'structural:deadbeef' };
+
+  const allow = await runVerification(cfg, { agentDid: agent.did, mandate: makeMandate(principal, agent.did), proposal: { counterparty: 'merchant-1', amount: '20', currency: 'USD' }, context: ctx });
+  assert.deepEqual(allow.context, ctx, 'context echoed on a valid, in-scope outcome');
+
+  const deny = await runVerification(cfg, { agentDid: agent.did, mandate: makeMandate(principal, agent.did), proposal: { counterparty: 'merchant-1', amount: '60', currency: 'USD' }, context: ctx });
+  assert.equal(deny.scope?.inScope, false);
+  assert.deepEqual(deny.context, ctx, 'context echoed even on a fail-closed deny');
+
+  const none = await runVerification(cfg, { agentDid: agent.did, mandate: makeMandate(principal, agent.did) });
+  assert.equal(none.context, undefined, 'absent when the caller sends no context');
+});
+
 test('HTTP surface: auth, signed response, proof verifies against the signer DID', async () => {
   const principal = makeAgent();
   const agent = makeAgent();
@@ -144,16 +160,20 @@ test('HTTP surface: auth, signed response, proof verifies against the signer DID
   process.env.OP_VERIFY_SCHEMA_ALLOWLIST = SCHEMA;
   process.env.OP_VERIFY_BEARER_TOKENS = 'arbis-test-token';
   process.env.OP_VERIFY_CACHE_DIR = join(dir, 'cache');
-  process.env.OP_VERIFY_AUDIT_LOG = join(dir, 'audit.jsonl');
   process.env.PORT = '18091';
   const { main } = await import('../dist/server.js');
   const server = await main();
 
   const url = 'http://127.0.0.1:18091/v1/verify';
-  const body = JSON.stringify({ agentDid: agent.did, mandate: makeMandate(principal, agent.did), proposal: { counterparty: 'merchant-1', amount: '20', currency: 'USD' } });
+  const correlation = { correlationId: 'arbis_run_http_1', fingerprint: 'structural:cafe' };
+  const body = JSON.stringify({ agentDid: agent.did, mandate: makeMandate(principal, agent.did), proposal: { counterparty: 'merchant-1', amount: '20', currency: 'USD' }, context: correlation });
 
   const noAuth = await fetch(url, { method: 'POST', body });
   assert.equal(noAuth.status, 401);
+
+  // an unknown token is 401 (only the configured token works)
+  const badTok = await fetch(url, { method: 'POST', body, headers: { authorization: 'Bearer not-a-real-token' } });
+  assert.equal(badTok.status, 401);
 
   const res = await fetch(url, { method: 'POST', body, headers: { authorization: 'Bearer arbis-test-token' } });
   assert.equal(res.status, 200);
@@ -161,6 +181,20 @@ test('HTTP surface: auth, signed response, proof verifies against the signer DID
   assert.equal(out.identity.valid, true, out.identity.reason);
   assert.equal(out.mandate.valid, true, out.mandate.reason);
   assert.equal(out.scope.inScope, true, out.scope?.reason);
+  // The opaque correlation context round-trips verbatim (and, being part of
+  // the signed document below, is covered by the response proof).
+  assert.deepEqual(out.context, correlation, 'context echoed in the HTTP response');
+
+  // A request that reject-guards oversized context.
+  const huge = JSON.stringify({ agentDid: agent.did, mandate: makeMandate(principal, agent.did), context: { blob: 'x'.repeat(5000) } });
+  const tooBig = await fetch(url, { method: 'POST', body: huge, headers: { authorization: 'Bearer arbis-test-token' } });
+  assert.equal(tooBig.status, 400);
+
+  // A request with no context: the field is simply absent from the response.
+  const bodyNoCtx = JSON.stringify({ agentDid: agent.did, mandate: makeMandate(principal, agent.did), proposal: { counterparty: 'merchant-1', amount: '20', currency: 'USD' } });
+  const resNoCtx = await fetch(url, { method: 'POST', body: bodyNoCtx, headers: { authorization: 'Bearer arbis-test-token' } });
+  const outNoCtx = await resNoCtx.json();
+  assert.equal(outNoCtx.context, undefined, 'no context in, no context out');
 
   // The response proof verifies against the signer's DID document — the
   // relying party's no-trust-in-transport check, done exactly as documented.

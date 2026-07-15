@@ -8,8 +8,7 @@
 //   OP_VERIFY_ISSUER_ALLOWLIST   comma-separated issuer DIDs accepted for mandates
 //   OP_VERIFY_SCHEMA_ALLOWLIST   comma-separated credentialSchema ids (frozen URLs)
 //   OP_VERIFY_BEARER_TOKENS      comma-separated partner tokens (issued manually)
-//   OP_VERIFY_CACHE_DIR          cache dir (DID docs, status lists)
-//   OP_VERIFY_AUDIT_LOG          decisions JSONL path
+//   OP_VERIFY_CACHE_DIR          cache dir (DID docs, status lists) — public material only
 //   PORT                         default 8091
 //   HOST                         default 127.0.0.1
 
@@ -25,6 +24,7 @@ const env = (k: string): string => {
 };
 
 const MAX_BODY = 256 * 1024; // a mandate is a few KB; anything huge is abuse
+const MAX_CONTEXT = 4 * 1024; // opaque correlation echo: a trace id, not a payload
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120; // per token per minute
 
@@ -48,10 +48,12 @@ export async function main(): Promise<Server> {
     issuerAllowlist: env('OP_VERIFY_ISSUER_ALLOWLIST').split(',').map((s) => s.trim()).filter(Boolean),
     schemaAllowlist: env('OP_VERIFY_SCHEMA_ALLOWLIST').split(',').map((s) => s.trim()).filter(Boolean),
     cacheDir: env('OP_VERIFY_CACHE_DIR'),
-    auditLog: env('OP_VERIFY_AUDIT_LOG'),
     ...(process.env.OP_VERIFY_OFFLINE_DIDDOC ? { offlineDidDocumentPath: process.env.OP_VERIFY_OFFLINE_DIDDOC } : {}),
   };
-  const tokens = env('OP_VERIFY_BEARER_TOKENS').split(',').map((s) => s.trim()).filter(Boolean);
+  // Deliberately optional and allowed-empty: a deployment with no partner
+  // tokens yet answers 401 to everyone, which is the correct fail-closed
+  // state until a token is minted. Never a boot failure.
+  const tokens = (process.env.OP_VERIFY_BEARER_TOKENS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const rate = new Map<string, { count: number; windowStart: number }>();
 
   const server = createServer((req, res) => {
@@ -92,6 +94,16 @@ export async function main(): Promise<Server> {
         if (typeof body?.agentDid !== 'string' || typeof body?.mandate !== 'object' || body.mandate === null) {
           return reply(400, { error: 'body must carry agentDid (string) and mandate (object)' });
         }
+        // Optional opaque correlation context: a plain JSON object, size-capped.
+        // Echoed verbatim into the signed response; never interpreted.
+        if (body.context !== undefined) {
+          if (typeof body.context !== 'object' || body.context === null || Array.isArray(body.context)) {
+            return reply(400, { error: 'context, if present, must be a JSON object' });
+          }
+          if (JSON.stringify(body.context).length > MAX_CONTEXT) {
+            return reply(400, { error: `context must serialize to <= ${MAX_CONTEXT} bytes` });
+          }
+        }
         try {
           const outcome = await runVerification(coreCfg, body);
           return reply(200, signer.sign(outcome as unknown as Record<string, unknown>));
@@ -102,6 +114,7 @@ export async function main(): Promise<Server> {
             identity: { valid: false, reason: `internal error, failing closed: ${(err as Error).message}` },
             mandate: { valid: false, reason: 'not evaluated (internal error, fail closed)' },
             verifiedAt: new Date().toISOString(),
+            ...(body.context !== undefined ? { context: body.context } : {}),
           }));
         }
       })();

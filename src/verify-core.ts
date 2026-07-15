@@ -36,6 +36,12 @@ export interface VerifyRequest {
     amount: string;
     currency: string;
   };
+  /** Optional opaque correlation context, echoed verbatim into the signed
+   * response so an external record (e.g. an observability trace id) binds
+   * cryptographically into this verdict. Never interpreted or trusted; the
+   * server size-caps it. Additive and backward-compatible: absent unless the
+   * caller sends it. */
+  context?: Record<string, unknown>;
 }
 
 export interface ComponentResult {
@@ -51,6 +57,9 @@ export interface VerifyOutcome {
   /** Present only when a proposal was submitted AND the mandate verified. */
   scope?: { inScope: boolean; reason?: string; notes?: string[] };
   verifiedAt: string;
+  /** Present only when the request carried `context`: the caller's opaque
+   * correlation object, echoed verbatim and covered by the response proof. */
+  context?: Record<string, unknown>;
 }
 
 export interface VerifyCoreConfig {
@@ -59,7 +68,6 @@ export interface VerifyCoreConfig {
   /** credentialSchema ids accepted (frozen schema URLs). Closed list. */
   schemaAllowlist: string[];
   cacheDir: string;
-  auditLog: string;
   /** Offline DID-document override for air-gapped tests. */
   offlineDidDocumentPath?: string;
   nowMs?: number;
@@ -88,6 +96,10 @@ export async function runVerification(cfg: VerifyCoreConfig, req: VerifyRequest)
     mandate: { valid: false },
     verifiedAt,
   };
+  // Echo the caller's opaque correlation context onto every outcome (allow or
+  // deny), so the verdict the caller receives -- and its signature -- carries
+  // it. Set before any early return so fail-closed verdicts carry it too.
+  if (req.context !== undefined) out.context = req.context;
 
   // ---- 1. Identity: the DID must resolve publicly, and the mandate must be
   // bound to exactly this DID. (Key-control proof is the challenge-response
@@ -136,7 +148,10 @@ export async function runVerification(cfg: VerifyCoreConfig, req: VerifyRequest)
       agentDid: req.agentDid,
       schemaAllowlist: cfg.schemaAllowlist,
       cacheDir: cfg.cacheDir,
-      auditLog: cfg.auditLog,
+      // Point the engine's audit sink at the per-request temp dir, which is
+      // removed in the finally below. There is deliberately NO persistent
+      // decisions log: nothing about a caller's mandate survives the request.
+      auditLog: join(dir, 'audit.jsonl'),
       rails: {},
       ...(cfg.offlineDidDocumentPath ? { offline: { didDocumentPath: cfg.offlineDidDocumentPath } } : {}),
     });

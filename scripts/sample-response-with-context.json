@@ -1,0 +1,37 @@
+{
+  "agentDid": "did:key:z6MkuL1RHDYyZdT5Hor9W21q47horejweF3HCy3tFxjU55mj",
+  "identity": {
+    "valid": true,
+    "notes": [
+      "DID resolved publicly; mandate subject binds to this DID"
+    ]
+  },
+  "mandate": {
+    "valid": true,
+    "notes": [
+      "credential carries no credentialStatus entry — revocation not checkable for this credential"
+    ],
+    "id": "urn:uuid:arbis-demo-1",
+    "issuer": "did:key:z6Mkkub1qWXveHwEiGfZMBT6dhgkqNsnh1zqT8q5wPY7ax6s",
+    "validUntil": "2030-01-01T00:00:00Z"
+  },
+  "verifiedAt": "2026-07-15T05:13:32.038Z",
+  "context": {
+    "correlationId": "arbis_run_9f3c2a",
+    "fingerprint": "structural:7d1e",
+    "source": "arbis"
+  },
+  "scope": {
+    "inScope": false,
+    "reason": "[ceiling] transaction value exceeds per_transaction_ceiling of 50 USD",
+    "notes": []
+  },
+  "proof": {
+    "type": "DataIntegrityProof",
+    "cryptosuite": "eddsa-jcs-2022",
+    "created": "2026-07-15T05:13:32Z",
+    "verificationMethod": "did:key:z6MkiGT4uHnoc4mk3Z3bEi67KwJDetq6aUqYVSYpAoZ1jBBS#z6MkiGT4uHnoc4mk3Z3bEi67KwJDetq6aUqYVSYpAoZ1jBBS",
+    "proofPurpose": "assertionMethod",
+    "proofValue": "z5oxzhDQFLy93Wvpf4NAipbG7XgUVoXLy1N5NMA6QRr9RN5SiND3BGh2SS6KhQkyecFmvdNzxPcLJkJiS66FsTLp2"
+  }
+}

@@ -39,6 +39,25 @@ Response (signed; `proposal` optional — omit it for identity+mandate only):
 
 Fail-closed inventory (each is a test): unresolvable DID · mandate not bound to the presented DID · issuer not in the deployment allowlist · expired credential · tampered credential · legacy proof suites rejected · unknown currency · internal error returns everything-invalid, never a silent pass. A stateless deployment carries no spend counters, so velocity/cross-rail-budget mandates fail closed on the scope check with a reason naming that.
 
+## Correlation context (optional, signed)
+
+The request may carry an optional `context` object — an opaque correlation record such as an external trace id or a run fingerprint:
+
+```json
+{ "agentDid": "...", "mandate": { ... }, "context": { "correlationId": "trace-abc", "fingerprint": "structural:..." } }
+```
+
+It is **echoed verbatim into the response and covered by the response proof**, so one signed verdict binds cryptographically to the caller's own record — the verdict provably belongs to that trace, not merely sits beside it. It is never interpreted or trusted, is size-capped (4 KB), and is absent from the response unless the caller sends it. Additive and backward-compatible: pre-existing callers see no change. Added in 0.2.0.
+
+## What it retains
+
+Stateless by construction, and verifiable on the box:
+
+- **No request bodies, mandates, headers, or verdicts are written to any persistent log.** There is no decisions/audit sink: the engine's audit path is directed at a per-request temp dir removed before the response returns. The service logs one startup line and nothing per-request (no access log; raw `node:http`, no framework).
+- **Unauthenticated requests write nothing at all** — the body is never read or parsed before the `401`.
+- The mandate touches disk only as a `0600` file inside the service's `PrivateTmp` namespace, solely to feed the engine's file-based `verifyCredential`, and is removed in a `finally` before responding. It never persists; `PrivateTmp` wipes it on restart regardless.
+- The only file the service persists is a cache of **public** DID documents / status lists under `OP_VERIFY_CACHE_DIR`.
+
 ## Identity, precisely
 
 The identity component asserts: the DID resolves publicly and the presented mandate is cryptographically bound to it. Proof of *live key control* is the separate challenge-response flow on the main API (`/observer/challenge` + `/observer/verify-agent`); a relying party that needs it can require both.
