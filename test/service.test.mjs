@@ -187,9 +187,9 @@ test('fail-closed default: empty token list denies all AND announces itself at b
 const ENGINE_VERSION = JSON.parse(
   readFileSync(new URL('../node_modules/@observer-protocol/policy-engine/package.json', import.meta.url), 'utf8'),
 ).version;
-const belowFloor = ENGINE_VERSION.localeCompare('0.3.0', undefined, { numeric: true }) < 0;
+const belowFloor = ENGINE_VERSION.localeCompare('0.3.3', undefined, { numeric: true }) < 0;
 const skipAuthed = belowFloor
-  ? `engine ${ENGINE_VERSION} is below the 0.3.0 floor: authenticated paths cannot be served, so they cannot be tested`
+  ? `engine ${ENGINE_VERSION} is below the 0.3.3 floor: authenticated paths cannot be served, so they cannot be tested`
   : false;
 
 test('interlock: tokens configured below the engine floor refuse to start', async () => {
@@ -220,7 +220,7 @@ test('interlock: tokens configured below the engine floor refuse to start', asyn
     () => main(),
     (err) => {
       if (belowFloor) {
-        assert.match(err.message, /below the 0\.3\.0 floor/);
+        assert.match(err.message, /below the 0\.3\.3 floor/);
         assert.match(err.message, /Move the pin first, then mint the token/);
         return true;
       }

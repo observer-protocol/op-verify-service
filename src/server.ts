@@ -27,11 +27,20 @@ import { createResponseSigner, type ResponseSigner } from './signer.js';
  * and a note is not a control. This makes it mechanical: with tokens present
  * and the bundled engine below this floor, the service refuses to start.
  *
- * Below 0.3.0 the engine lacks fixes this service's verdicts depend on. A
- * deployment that mints a partner token against an older engine would answer
- * real callers using it, and nothing else in the pipeline would notice.
+ * The floor is the documented PIN TARGET, not the first 0.3.x. /etc/op-verify/env
+ * on op-vps records the decision as ^0.2.0 -> ^0.3.3, and the verified evidence
+ * is narrow: against a mandate capped at 100, engine 0.2.0 returns a SIGNED
+ * inScope:true for a payment of 1,000,000, and 0.3.3 denies it. 0.3.0 through
+ * 0.3.2 are UNVERIFIED, not known-good. Setting the floor at 0.3.0 would admit
+ * versions never shown to fix the defect this interlock exists to contain.
+ *
+ * The defect: engine 0.2.0 does not read
+ * credentialSubject.delegation.scope.spending_limits.per_rail, which is where
+ * /sovereign/delegate, /sovereign/claim and the enterprise issue-delegation
+ * modal put EVERY cap. Minting a bearer token is the single action that makes
+ * that reachable by an external relying party.
  */
-const MIN_ENGINE_VERSION = '0.3.0';
+const MIN_ENGINE_VERSION = '0.3.3';
 
 /** Numeric semver compare, majors/minors/patches only. -1 | 0 | 1. */
 function cmpVersion(a: string, b: string): number {
