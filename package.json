@@ -7,8 +7,17 @@
   "main": "dist/index.cjs",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" } },
-  "files": ["dist", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
@@ -17,7 +26,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@observer-protocol/policy-engine": "^0.2.0"
+    "@observer-protocol/policy-engine": "^0.3.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

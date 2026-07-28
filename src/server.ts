@@ -19,6 +19,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { runVerification, type VerifyRequest } from './verify-core.js';
 import { createResponseSigner, type ResponseSigner } from './signer.js';
+// Namespace import so a missing export is `undefined` rather than a load error:
+// this file must keep working against an engine that predates compareCoreVersion.
+import * as engineExports from '@observer-protocol/policy-engine';
 
 /**
  * The engine floor this service may serve authenticated traffic on.
@@ -27,23 +30,43 @@ import { createResponseSigner, type ResponseSigner } from './signer.js';
  * and a note is not a control. This makes it mechanical: with tokens present
  * and the bundled engine below this floor, the service refuses to start.
  *
- * The floor is the documented PIN TARGET, not the first 0.3.x. /etc/op-verify/env
- * on op-vps records the decision as ^0.2.0 -> ^0.3.3, and the verified evidence
- * is narrow: against a mandate capped at 100, engine 0.2.0 returns a SIGNED
- * inScope:true for a payment of 1,000,000, and 0.3.3 denies it. 0.3.0 through
- * 0.3.2 are UNVERIFIED, not known-good. Setting the floor at 0.3.0 would admit
- * versions never shown to fix the defect this interlock exists to contain.
+ * THE FLOOR IS NOT THE PIN. The dependency is pinned at ^0.3.3 (newest, and
+ * what the adapters run); this gate is set at 0.3.0, the BEHAVIOUR boundary.
+ * 0.3.0 is where both relevant changes landed: e64b8ef "read + enforce
+ * delegation.scope.spending_limits.per_rail" and 7337f61 "fail closed on
+ * unrecognized mandate shape", both 2026-07-15, both recorded under 0.3.0 in
+ * the engine CHANGELOG. Everything from 0.3.1 to 0.3.3 is cross-rail LEDGER
+ * work, and this service is stateless and holds no counters, so that path never
+ * executes here.
  *
- * The defect: engine 0.2.0 does not read
+ * Keeping them distinct is deliberate: a future patch-level rollback within
+ * 0.3.x must not trip a gate it has no business tripping. A floor set to the
+ * pin would do exactly that.
+ *
+ * Do NOT reuse LEDGER_SAFE_FLOOR ('0.3.2'). It is a different floor for a
+ * different property.
+ *
+ * The defect this contains: engine 0.2.0 does not read
  * credentialSubject.delegation.scope.spending_limits.per_rail, which is where
  * /sovereign/delegate, /sovereign/claim and the enterprise issue-delegation
- * modal put EVERY cap. Minting a bearer token is the single action that makes
- * that reachable by an external relying party.
+ * modal put EVERY cap. Against a mandate capped at 100, 0.2.0 returns a SIGNED
+ * inScope:true for a payment of 1,000,000. Minting a bearer token is the single
+ * action that makes that reachable by an external relying party.
  */
-const MIN_ENGINE_VERSION = '0.3.3';
+const MIN_ENGINE_VERSION = '0.3.0';
 
-/** Numeric semver compare, majors/minors/patches only. -1 | 0 | 1. */
+/**
+ * Compare two versions, preferring the engine's own exported comparator.
+ *
+ * compareCoreVersion ships in 0.3.3+. This gate must also run when the engine
+ * is OLD — that is its entire purpose — and an old engine does not export it.
+ * So the local fallback is not a hand-rolled duplicate of a shipped function,
+ * it is the path taken precisely when the shipped function cannot exist.
+ */
 function cmpVersion(a: string, b: string): number {
+  const engineCmp = (engineExports as { compareCoreVersion?: (x: string, y: string) => number })
+    ?.compareCoreVersion;
+  if (typeof engineCmp === 'function') return engineCmp(a, b);
   const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
   const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
   for (let i = 0; i < 3; i++) {

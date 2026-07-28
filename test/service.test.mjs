@@ -187,12 +187,13 @@ test('fail-closed default: empty token list denies all AND announces itself at b
 const ENGINE_VERSION = JSON.parse(
   readFileSync(new URL('../node_modules/@observer-protocol/policy-engine/package.json', import.meta.url), 'utf8'),
 ).version;
-const belowFloor = ENGINE_VERSION.localeCompare('0.3.3', undefined, { numeric: true }) < 0;
+const FLOOR = '0.3.0';
+const belowFloor = ENGINE_VERSION.localeCompare(FLOOR, undefined, { numeric: true }) < 0;
 const skipAuthed = belowFloor
-  ? `engine ${ENGINE_VERSION} is below the 0.3.3 floor: authenticated paths cannot be served, so they cannot be tested`
+  ? `engine ${ENGINE_VERSION} is below the ${FLOOR} floor: authenticated paths cannot be served, so they cannot be tested`
   : false;
 
-test('interlock: tokens configured below the engine floor refuse to start', async () => {
+test('interlock: satisfied above the floor, and still refuses when the engine is unidentifiable', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'opverify-floor-'));
   const kp = generateKeyPairSync('ed25519');
   const pub = Buffer.from(kp.publicKey.export({ format: 'jwk' }).x, 'base64url');
@@ -205,30 +206,42 @@ test('interlock: tokens configured below the engine floor refuse to start', asyn
   process.env.OP_VERIFY_ISSUER_ALLOWLIST = did;
   process.env.OP_VERIFY_SCHEMA_ALLOWLIST = SCHEMA;
   process.env.OP_VERIFY_CACHE_DIR = join(dir, 'cache');
-  process.env.PORT = '18093';
   const { main } = await import('../dist/server.js');
+  // Distinct port per start: close() is async, so reusing one port races EADDRINUSE.
+  const closed = (srv) => new Promise((r) => srv.close(r));
 
-  // No tokens: starts, and answers 401 to everyone. Fail-closed, not a failure.
+  // No tokens: starts at any engine version. Fail-closed 401, not a failure.
+  process.env.PORT = '18093';
   process.env.OP_VERIFY_BEARER_TOKENS = '';
-  const ok = await main();
-  ok.close();
+  await closed(await main());
 
-  // A token present is the moment a real caller could get a verdict. Below the
-  // floor that must stop the service, not serve from an old engine.
+  // Tokens present, engine at or above the floor: the interlock is SATISFIED
+  // rather than dormant. Before the pin move this same call refused.
+  assert.ok(!belowFloor, `expected engine ${ENGINE_VERSION} to be at or above the ${FLOOR} floor`);
+  process.env.PORT = '18095';
   process.env.OP_VERIFY_BEARER_TOKENS = 'a-minted-token';
-  await assert.rejects(
-    () => main(),
-    (err) => {
-      if (belowFloor) {
-        assert.match(err.message, /below the 0\.3\.3 floor/);
-        assert.match(err.message, /Move the pin first, then mint the token/);
+  await closed(await main());
+
+  // The refusal path must still work. Rather than fake a version, run from a cwd
+  // where the engine cannot be resolved at all: installedEngineVersion() returns
+  // null and "unknown refuses" fires. Same refusal branch, real code.
+  const cwd = process.cwd();
+  try {
+    process.chdir(mkdtempSync(join(tmpdir(), 'opverify-noengine-')));
+    process.env.PORT = '18094';
+    await assert.rejects(
+      () => main(),
+      (err) => {
+        assert.match(err.message, /could not be determined/);
+        assert.match(err.message, /Refusing to serve authenticated traffic/);
         return true;
-      }
-      throw err; // at or above the floor this must NOT reject
-    },
-    'a token minted below the engine floor must refuse to start',
-  );
-  process.env.OP_VERIFY_BEARER_TOKENS = '';
+      },
+      'an unidentifiable engine must refuse while tokens are configured',
+    );
+  } finally {
+    process.chdir(cwd);
+    process.env.OP_VERIFY_BEARER_TOKENS = '';
+  }
 });
 
 test('HTTP surface: auth, signed response, proof verifies against the signer DID', { skip: skipAuthed }, async () => {
