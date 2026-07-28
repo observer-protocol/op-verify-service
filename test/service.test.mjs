@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, sign as edSign, createHash, verify as edVerify } from 'node:crypto';
@@ -317,4 +317,43 @@ test('HTTP surface: auth, signed response, proof verifies against the signer DID
   assert.equal(edVerify(null, hashData, keyObj, sigBytes), true, 'signed response must verify against the DID document');
 
   server.close();
+});
+
+// The engine-floor gate reads the version from node_modules. That is correct for
+// THIS service only because it does not bundle the engine — the resolved copy is
+// the running copy. The engine's own version.ts warns that under dual-presence
+// the resolved copy is "the misleading one", because it upgrades on install while
+// a bundled runtime stays frozen.
+//
+// So the gate's correctness rests on a property of the BUILD, not on the gate. If
+// op-verify ever starts bundling, the gate keeps reading node_modules, keeps
+// returning a number, and silently stops describing what runs. Nothing fails.
+//
+// This asserts the property, which converts a silent future expiry into a loud
+// one. It was prose until 2026-07-28; prose is a precondition with no trigger.
+test('engine-floor vantage: dist must NOT bundle the policy engine', async () => {
+  const distDir = new URL('../dist/', import.meta.url);
+  const files = readdirSync(distDir).filter((f) => f.endsWith('.js') || f.endsWith('.cjs'));
+  assert.ok(files.length > 0, 'no dist output found — run the build first');
+
+  let externalRefs = 0;
+  let bundledMarkers = 0;
+  for (const f of files) {
+    const src = readFileSync(new URL(f, distDir), 'utf8');
+    externalRefs += (src.match(/@observer-protocol\/policy-engine/g) ?? []).length;
+    // A string only present in the engine's own rule implementations. If these
+    // appear in our dist, the engine has been inlined and the gate is measuring
+    // a copy that is not the one enforcing.
+    bundledMarkers += (src.match(/spending_limits/g) ?? []).length;
+  }
+
+  assert.ok(
+    externalRefs > 0,
+    'dist has no external reference to the policy engine — either the build changed or the engine is now bundled; either way the version gate\'s vantage is no longer valid',
+  );
+  assert.equal(
+    bundledMarkers,
+    0,
+    'dist contains bundled engine rule strings: the engine is being inlined, so the version read from node_modules no longer describes what runs. Fix the gate to report CORE_VERSION from the bundled copy before shipping this.',
+  );
 });
