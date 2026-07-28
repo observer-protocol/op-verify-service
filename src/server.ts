@@ -14,8 +14,94 @@
 
 import { createServer, type Server } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { runVerification, type VerifyRequest } from './verify-core.js';
 import { createResponseSigner, type ResponseSigner } from './signer.js';
+
+/**
+ * The engine floor this service may serve authenticated traffic on.
+ *
+ * THE INTERLOCK. "No bearer token is minted until the pin moves" was a note,
+ * and a note is not a control. This makes it mechanical: with tokens present
+ * and the bundled engine below this floor, the service refuses to start.
+ *
+ * Below 0.3.0 the engine lacks fixes this service's verdicts depend on. A
+ * deployment that mints a partner token against an older engine would answer
+ * real callers using it, and nothing else in the pipeline would notice.
+ */
+const MIN_ENGINE_VERSION = '0.3.0';
+
+/** Numeric semver compare, majors/minors/patches only. -1 | 0 | 1. */
+function cmpVersion(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0) ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
+ * Installed version of the bundled engine, or null if it cannot be determined.
+ *
+ * Read off disk rather than imported: the engine's exports map does not expose
+ * package.json, and this file builds to both ESM and CJS so import.meta is not
+ * portable here. Resolution is anchored on cwd, which systemd sets via
+ * WorkingDirectory.
+ */
+function installedEngineVersion(): string | null {
+  try {
+    const req = createRequire(join(process.cwd(), 'noop.js'));
+    let dir = dirname(req.resolve('@observer-protocol/policy-engine'));
+    for (let i = 0; i < 8; i++) {
+      const p = join(dir, 'package.json');
+      if (existsSync(p)) {
+        const pkg = JSON.parse(readFileSync(p, 'utf8')) as { name?: string; version?: string };
+        if (pkg.name === '@observer-protocol/policy-engine') return pkg.version ?? null;
+      }
+      const up = dirname(dir);
+      if (up === dir) break;
+      dir = up;
+    }
+  } catch {
+    // fall through to null: unresolvable is indistinguishable from wrong
+  }
+  return null;
+}
+
+/**
+ * Refuse to serve authenticated traffic on an engine below the floor.
+ *
+ * No tokens configured is fine at any engine version: the service answers 401
+ * to everyone, which is the correct fail-closed state. The gate only bites when
+ * a token exists, because that is the moment a real caller can get a verdict.
+ *
+ * An UNDETERMINABLE version is treated as below the floor. Unknown is a failure
+ * state, not a pass — serving on an engine we cannot identify is the thing this
+ * interlock exists to prevent.
+ */
+function assertEngineFloor(tokenCount: number): void {
+  if (tokenCount === 0) return;
+  const found = installedEngineVersion();
+  if (found === null) {
+    throw new Error(
+      `${tokenCount} bearer token(s) configured but the bundled ` +
+      `@observer-protocol/policy-engine version could not be determined. ` +
+      `Refusing to serve authenticated traffic on an unidentified engine. ` +
+      `Run from the service's install directory, or clear OP_VERIFY_BEARER_TOKENS.`,
+    );
+  }
+  if (cmpVersion(found, MIN_ENGINE_VERSION) < 0) {
+    throw new Error(
+      `${tokenCount} bearer token(s) configured but @observer-protocol/policy-engine ` +
+      `is ${found}, below the ${MIN_ENGINE_VERSION} floor this service requires. ` +
+      `Move the pin first, then mint the token — not the other way round. ` +
+      `Clearing OP_VERIFY_BEARER_TOKENS returns the service to its fail-closed 401 state.`,
+    );
+  }
+}
 
 const env = (k: string): string => {
   const v = process.env[k];
@@ -53,7 +139,14 @@ export async function main(): Promise<Server> {
   // Deliberately optional and allowed-empty: a deployment with no partner
   // tokens yet answers 401 to everyone, which is the correct fail-closed
   // state until a token is minted. Never a boot failure.
+  //
+  // MINT SITE. Setting OP_VERIFY_BEARER_TOKENS is what turns this service from
+  // "denies everyone" into "answers a real partner". Its precondition is the
+  // engine pin: see MIN_ENGINE_VERSION above. assertEngineFloor enforces that
+  // mechanically on the next line, so a token added here against an old engine
+  // stops the service rather than serving verdicts from it.
   const tokens = (process.env.OP_VERIFY_BEARER_TOKENS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  assertEngineFloor(tokens.length);
   const rate = new Map<string, { count: number; windowStart: number }>();
 
   const server = createServer((req, res) => {

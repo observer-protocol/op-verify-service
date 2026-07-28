@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, sign as edSign, createHash, verify as edVerify } from 'node:crypto';
@@ -180,7 +180,58 @@ test('fail-closed default: empty token list denies all AND announces itself at b
   server.close();
 });
 
-test('HTTP surface: auth, signed response, proof verifies against the signer DID', async () => {
+// The engine floor gates every authenticated path, so the tests that exercise
+// one are gated on the same condition rather than bypassed. No escape hatch:
+// an env var that disables the interlock for tests is an env var that ends up
+// in a production unit file. When the pin moves these un-skip on their own.
+const ENGINE_VERSION = JSON.parse(
+  readFileSync(new URL('../node_modules/@observer-protocol/policy-engine/package.json', import.meta.url), 'utf8'),
+).version;
+const belowFloor = ENGINE_VERSION.localeCompare('0.3.0', undefined, { numeric: true }) < 0;
+const skipAuthed = belowFloor
+  ? `engine ${ENGINE_VERSION} is below the 0.3.0 floor: authenticated paths cannot be served, so they cannot be tested`
+  : false;
+
+test('interlock: tokens configured below the engine floor refuse to start', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opverify-floor-'));
+  const kp = generateKeyPairSync('ed25519');
+  const pub = Buffer.from(kp.publicKey.export({ format: 'jwk' }).x, 'base64url');
+  const did = 'did:key:z' + b58(Buffer.concat([Buffer.from([0xed, 0x01]), pub]));
+  const keyPath = join(dir, 'signing.pem');
+  writeFileSync(keyPath, kp.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+
+  process.env.OP_VERIFY_SIGNING_KEY_PATH = keyPath;
+  process.env.OP_VERIFY_SIGNING_VM = `${did}#${did.slice('did:key:'.length)}`;
+  process.env.OP_VERIFY_ISSUER_ALLOWLIST = did;
+  process.env.OP_VERIFY_SCHEMA_ALLOWLIST = SCHEMA;
+  process.env.OP_VERIFY_CACHE_DIR = join(dir, 'cache');
+  process.env.PORT = '18093';
+  const { main } = await import('../dist/server.js');
+
+  // No tokens: starts, and answers 401 to everyone. Fail-closed, not a failure.
+  process.env.OP_VERIFY_BEARER_TOKENS = '';
+  const ok = await main();
+  ok.close();
+
+  // A token present is the moment a real caller could get a verdict. Below the
+  // floor that must stop the service, not serve from an old engine.
+  process.env.OP_VERIFY_BEARER_TOKENS = 'a-minted-token';
+  await assert.rejects(
+    () => main(),
+    (err) => {
+      if (belowFloor) {
+        assert.match(err.message, /below the 0\.3\.0 floor/);
+        assert.match(err.message, /Move the pin first, then mint the token/);
+        return true;
+      }
+      throw err; // at or above the floor this must NOT reject
+    },
+    'a token minted below the engine floor must refuse to start',
+  );
+  process.env.OP_VERIFY_BEARER_TOKENS = '';
+});
+
+test('HTTP surface: auth, signed response, proof verifies against the signer DID', { skip: skipAuthed }, async () => {
   const principal = makeAgent();
   const agent = makeAgent();
   const dir = mkdtempSync(join(tmpdir(), 'opverify-http-'));
