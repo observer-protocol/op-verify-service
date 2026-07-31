@@ -186,7 +186,24 @@ export async function main(): Promise<Server> {
       res.writeHead(code, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
-    if (req.method === 'GET' && req.url === '/health') return void reply(200, { status: 'ok', signingVm: signer.verificationMethod });
+    // /health REPORTS WHAT IT LOADED, not merely that it is up.
+    //
+    // The schema and issuer allowlists are deployment state: a code change does not touch them, a
+    // stale deploy keeps them, and establishing the live value previously required ssh to the host.
+    // On a ceremony day the question is "did the restart take effect", and that should be answerable
+    // with a curl rather than by going to look.
+    //
+    // NEITHER LIST IS A SECRET. Both are frozen public URLs and public DIDs, and a caller learning
+    // what this deployment accepts learns nothing it could not learn by presenting a credential and
+    // reading the refusal, which already names the allowlist.
+    if (req.method === 'GET' && req.url === '/health') {
+      return void reply(200, {
+        status: 'ok',
+        signingVm: signer.verificationMethod,
+        schemaAllowlist: coreCfg.schemaAllowlist,
+        issuerAllowlist: coreCfg.issuerAllowlist,
+      });
+    }
     if (req.method !== 'POST' || req.url !== '/v1/verify') return void reply(404, { error: 'POST /v1/verify' });
 
     const auth = req.headers.authorization;

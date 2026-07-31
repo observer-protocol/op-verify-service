@@ -357,3 +357,30 @@ test('engine-floor vantage: dist must NOT bundle the policy engine', async () =>
     'dist contains bundled engine rule strings: the engine is being inlined, so the version read from node_modules no longer describes what runs. Fix the gate to report CORE_VERSION from the bundled copy before shipping this.',
   );
 });
+
+// ---- /health reports what this deployment LOADED ----------------------------
+//
+// The allowlists are deployment state: a code change does not touch them, a stale deploy keeps them,
+// and establishing the live value previously required ssh to the host. On a ceremony day the question
+// is "did the restart take effect", and it should be answerable with a curl.
+test('/health reports both allowlists, and leaks nothing else', () => {
+  const src = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  const start = src.indexOf("req.url === '/health'");
+  const body = src.slice(start, src.indexOf('if (req.method !==', start));
+
+  // WHAT IT MUST REPORT. Without these the restart-took-effect question stays an ssh.
+  assert.match(body, /schemaAllowlist: coreCfg\.schemaAllowlist/);
+  assert.match(body, /issuerAllowlist: coreCfg\.issuerAllowlist/);
+
+  // WHAT IT MUST NOT. Both lists are frozen public URLs and public DIDs, and a caller learns nothing
+  // it could not learn by presenting a credential and reading the refusal, which already names the
+  // allowlist. That reasoning does NOT extend to the signing key, the key path, or partner tokens,
+  // and an endpoint that grew to report "the config" would take them along.
+  for (const secret of ['keyPath', 'OP_VERIFY_SIGNING_KEY_PATH', 'tokens', 'partnerTokens', 'bearer']) {
+    assert.ok(!body.includes(secret), `/health must not expose ${secret}`);
+  }
+  // MUST-STILL-PASS: it still answers the liveness question it answered before, or this is a
+  // different endpoint wearing the same name.
+  assert.match(body, /status: 'ok'/);
+  assert.match(body, /signingVm/);
+});
