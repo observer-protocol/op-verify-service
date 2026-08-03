@@ -26,8 +26,32 @@ const shell = (cmd: string, args: string[]): string => {
 // says what it is.
 const COMMIT = shell('git', ['rev-parse', 'HEAD']);
 const BRANCH = shell('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
-const DIRTY = shell('git', ['status', '--porcelain']) !== 'unknown'
-  && shell('git', ['status', '--porcelain']).length > 0;
+
+/** THREE OUTCOMES, NOT TWO, and collapsing them is what broke this the first time.
+ *
+ * `shell()` returns 'unknown' both when git FAILS and when it succeeds with EMPTY output — and a
+ * clean tree produces empty output. So "clean" and "no git here" were the same value, and the flag
+ * derived from it was wrong on a clean tree: it stamped `dirty: true` on every build, which is a
+ * field that is always true and therefore carries nothing.
+ *
+ * Caught by measuring it — a clean checkout produced `dirty: true` in the bundle — rather than by
+ * reading the expression, which looked right.
+ *
+ *   'clean'    tracked tree matches HEAD
+ *   'dirty'    it does not, so the bytes do not correspond to the commit
+ *   'unknown'  git could not be consulted, which is neither of the above
+ */
+const DIRTY_STATE: 'clean' | 'dirty' | 'unknown' = (() => {
+  try {
+    const out = execFileSync('git', ['status', '--porcelain'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.trim().length > 0 ? 'dirty' : 'clean';
+  } catch {
+    return 'unknown';
+  }
+})();
 const BUILT_AT = new Date().toISOString();
 
 /** The engine the bundle was BUILT against. `installedEngineVersion()` reports the one it RUNS
@@ -54,8 +78,8 @@ export default defineConfig({
     __BUILD_BRANCH__: JSON.stringify(BRANCH),
     // A DIRTY TREE IS PART OF THE IDENTITY. A commit hash alone says which commit was checked out,
     // not that the bytes match it — and "built from uncommitted changes" is exactly the state
-    // nobody can reproduce later.
-    __BUILD_DIRTY__: JSON.stringify(DIRTY),
+    // nobody can reproduce later. Three-valued, so "clean" and "could not tell" stay distinct.
+    __BUILD_DIRTY__: JSON.stringify(DIRTY_STATE),
     __BUILT_AT__: JSON.stringify(BUILT_AT),
     __BUILD_ENGINE__: JSON.stringify(ENGINE),
   },

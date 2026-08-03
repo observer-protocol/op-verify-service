@@ -471,7 +471,12 @@ test('/version reports the build stamp, and an unstamped build says so rather th
   // provenance and the assertion says which field.
   assert.match(v.build.commit, /^[0-9a-f]{40}$/, `build.commit must be a real sha, got ${v.build.commit}`);
   assert.notEqual(v.build.branch, 'unknown', 'build.branch must be established in a git build');
-  assert.equal(typeof v.build.dirty, 'boolean', 'dirty is a fact, not a string');
+  // THREE-VALUED, and this assertion is why. As a boolean it read `true` on a CLEAN tree — the
+  // `shell()` helper returned 'unknown' both when git failed and when it succeeded with the empty
+  // output a clean tree produces, so "clean" and "no git" were one value. A flag that is always true
+  // carries nothing. Caught by measuring the bundle, not by reading the expression.
+  assert.ok(['clean', 'dirty', 'unknown'].includes(v.build.dirty),
+    `dirty must be one of clean|dirty|unknown, got ${JSON.stringify(v.build.dirty)}`);
   assert.ok(Date.parse(v.builtAt ?? v.build.builtAt) > 0, 'builtAt must parse as a time');
 
   // BUILT-AGAINST AND RUNNING-AGAINST ARE BOTH REPORTED. Reporting one would hide a dist copied onto

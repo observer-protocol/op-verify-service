@@ -6,6 +6,8 @@
 // one that omits the field and reads as unstamped-but-fine.
 declare const __BUILD_COMMIT__: string;
 declare const __BUILD_BRANCH__: string;
-declare const __BUILD_DIRTY__: boolean;
+/** 'clean' | 'dirty' | 'unknown'. Three-valued because a clean tree and an absent git are
+ * different facts, and collapsing them stamped every build dirty. */
+declare const __BUILD_DIRTY__: string;
 declare const __BUILT_AT__: string;
 declare const __BUILD_ENGINE__: string;
