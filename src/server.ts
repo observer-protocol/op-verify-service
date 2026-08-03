@@ -192,6 +192,36 @@ const RATE_MAX_GLOBAL = 600;  // whole service per minute
  * assumption is false and an attacker rotates the header to get an unlimited number of buckets.
  * The global ceiling is what bounds the damage in that case, which is half of why it exists.
  */
+/** WHAT THIS DEPLOYMENT ACCEPTS, AND WHERE THAT CAME FROM.
+ *
+ * The list alone answers "what" and not "who decided". Both allowlists are ENVIRONMENT, set in a file
+ * on the box that is in NO REPOSITORY — so nothing reproduces them, nothing reviews a change to them,
+ * and until now `/health` printing the list was the only way to see what it was. The v2.2 entry was
+ * added by hand with sudo on 2026-08-03 and that change exists nowhere but a shell history.
+ *
+ * NAMING THE SOURCE IS NOT FIXING IT. `inRepo: false` is a true statement about a gap, reported so a
+ * reader knows the list they are looking at has no provenance behind it. See the README for what
+ * moving it into a repo would take.
+ */
+function allowlistReport(cfg: { schemaAllowlist: string[]; issuerAllowlist: string[] }) {
+  return {
+    accepts: {
+      schemas: cfg.schemaAllowlist,
+      issuers: cfg.issuerAllowlist,
+      source: {
+        schemas: 'env:OP_VERIFY_SCHEMA_ALLOWLIST',
+        issuers: 'env:OP_VERIFY_ISSUER_ALLOWLIST',
+        inRepo: false,
+        note:
+          'Both lists are deployment environment, not code. They are set in an env file on the host ' +
+          'that no repository contains, so a change to either leaves no reviewable record. This ' +
+          'endpoint reports them so the question is answerable without shell access; it does not ' +
+          'make them reproducible.',
+      },
+    },
+  };
+}
+
 function callerKey(req: { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string | undefined } }): string {
   const cf = req.headers['cf-connecting-ip'];
   if (typeof cf === 'string' && cf.length > 0) return `cf:${cf}`;
@@ -262,9 +292,48 @@ export async function main(): Promise<Server> {
         signingVm: signer.verificationMethod,
         schemaAllowlist: coreCfg.schemaAllowlist,
         issuerAllowlist: coreCfg.issuerAllowlist,
+        // THE SAME BLOCK AS /version, from the same function. Two endpoints computing this
+        // separately is two answers to "what does this deployment accept".
+        ...allowlistReport(coreCfg),
+        build: { commit: __BUILD_COMMIT__, dirty: __BUILD_DIRTY__ },
       });
     }
-    if (req.method !== 'POST' || req.url !== '/v1/verify') return void reply(404, { error: 'POST /v1/verify' });
+    if (req.method === 'GET' && req.url === '/version') {
+      // ─── WHAT IS RUNNING, ANSWERABLE WITHOUT SHELL ACCESS ─────────────────────────────────
+      //
+      // Before this, answering it meant sshing to the box, hashing dist files, and comparing them
+      // against release directories — and on this service that comparison matched NOTHING: the
+      // running bundle existed in exactly one place, no preserved copy, and the PROVENANCE file
+      // named a commit three days older than the bytes.
+      //
+      // The stamp is embedded at BUILD time, so it travels with the artifact rather than describing
+      // it from beside it.
+      return void reply(200, {
+        service: '@observer-protocol/op-verify-service',
+        build: {
+          commit: __BUILD_COMMIT__,
+          branch: __BUILD_BRANCH__,
+          // TRUE MEANS THE BYTES DO NOT MATCH THE COMMIT. A hash alone says which commit was checked
+          // out, not that the tree was clean when it was built.
+          dirty: __BUILD_DIRTY__,
+          builtAt: __BUILT_AT__,
+        },
+        engine: {
+          // BUILT AGAINST vs RUNNING AGAINST, and they can differ: a dist copied onto a box whose
+          // node_modules moved underneath it. Reporting one would make that invisible.
+          builtAgainst: __BUILD_ENGINE__,
+          running: installedEngineVersion() ?? 'unknown',
+          agree: (installedEngineVersion() ?? 'unknown') === __BUILD_ENGINE__,
+        },
+        verification: {
+          open: true,
+          rateLimitPerCallerPerMin: RATE_MAX,
+          rateLimitGlobalPerMin: RATE_MAX_GLOBAL,
+        },
+        ...allowlistReport(coreCfg),
+      });
+    }
+    if (req.method !== 'POST' || req.url !== '/v1/verify') return void reply(404, { error: 'GET /health, GET /version, POST /v1/verify' });
 
     // NO AUTHENTICATION. See RATE_MAX above for why, and note what is NOT here: there is no
     // identifier to look a credential up by, so an unauthenticated caller cannot ask this service

@@ -436,3 +436,60 @@ test('/health reports both allowlists, and leaks nothing else', () => {
   assert.match(body, /status: 'ok'/);
   assert.match(body, /signingVm/);
 });
+
+
+// ─── THE STAMP: WHAT IS RUNNING, ANSWERABLE WITHOUT SHELL ACCESS ────────────────────────────────
+//
+// This service's running bundle matched NOTHING preserved on the box — not a release directory, not
+// a backup, not the PROVENANCE file, which named a commit three days older than the bytes. Answering
+// "what is running" required hashing files over ssh and still came back inconclusive.
+test('/version reports the build stamp, and an unstamped build says so rather than omitting it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opverify-version-'));
+  const kp = generateKeyPairSync('ed25519');
+  const pub = Buffer.from(kp.publicKey.export({ format: 'jwk' }).x, 'base64url');
+  const did = 'did:key:z' + b58(Buffer.concat([Buffer.from([0xed, 0x01]), pub]));
+  const keyPath = join(dir, 'signing.pem');
+  writeFileSync(keyPath, kp.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+
+  process.env.OP_VERIFY_SIGNING_KEY_PATH = keyPath;
+  process.env.OP_VERIFY_SIGNING_VM = `${did}#${did.slice('did:key:'.length)}`;
+  process.env.OP_VERIFY_ISSUER_ALLOWLIST = 'did:web:observerprotocol.org';
+  process.env.OP_VERIFY_SCHEMA_ALLOWLIST = SCHEMA;
+  process.env.OP_VERIFY_CACHE_DIR = join(dir, 'cache');
+  process.env.PORT = '18096';
+  const { main } = await import('../dist/server.js');
+  const server = await main();
+
+  const v = await (await fetch('http://127.0.0.1:18096/version')).json();
+
+  // EVERY FIELD PRESENT. An absent field and a field saying "unknown" are different facts, and only
+  // the second is honest about a build that could not identify itself.
+  for (const k of ['commit', 'branch', 'dirty', 'builtAt']) {
+    assert.ok(k in v.build, `/version must carry build.${k}`);
+  }
+  // BUILT IN A GIT CHECKOUT, so these are real. If this ever reads "unknown" the build lost its
+  // provenance and the assertion says which field.
+  assert.match(v.build.commit, /^[0-9a-f]{40}$/, `build.commit must be a real sha, got ${v.build.commit}`);
+  assert.notEqual(v.build.branch, 'unknown', 'build.branch must be established in a git build');
+  assert.equal(typeof v.build.dirty, 'boolean', 'dirty is a fact, not a string');
+  assert.ok(Date.parse(v.builtAt ?? v.build.builtAt) > 0, 'builtAt must parse as a time');
+
+  // BUILT-AGAINST AND RUNNING-AGAINST ARE BOTH REPORTED. Reporting one would hide a dist copied onto
+  // a box whose node_modules moved underneath it.
+  assert.ok(v.engine.builtAgainst, 'the engine the bundle was built against');
+  assert.ok(v.engine.running, 'the engine it is running against');
+  assert.equal(v.engine.agree, v.engine.builtAgainst === v.engine.running, 'agree must be derived, not asserted');
+
+  // THE ALLOWLIST AND ITS SOURCE, so "what does this deployment accept" needs no shell.
+  assert.deepEqual(v.accepts.schemas, [SCHEMA]);
+  assert.equal(v.accepts.source.schemas, 'env:OP_VERIFY_SCHEMA_ALLOWLIST');
+  assert.equal(v.accepts.source.inRepo, false, 'the lists are environment, and saying so is the point');
+
+  // /health CARRIES THE SAME BLOCK, from the same function — two endpoints computing it separately
+  // is two answers to one question.
+  const h = await (await fetch('http://127.0.0.1:18096/health')).json();
+  assert.deepEqual(h.accepts, v.accepts, '/health and /version must not disagree about what is accepted');
+  assert.equal(h.build.commit, v.build.commit);
+
+  server.close();
+});
