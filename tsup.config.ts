@@ -43,13 +43,26 @@ const BRANCH = shell('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
  */
 const DIRTY_STATE: 'clean' | 'dirty' | 'unknown' = (() => {
   try {
-    const out = execFileSync('git', ['status', '--porcelain'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    return out.trim().length > 0 ? 'dirty' : 'clean';
-  } catch {
-    return 'unknown';
+    // TRACKED CHANGES ONLY, AND THE REASON IS THE MEASUREMENT CHANGING WHAT IT MEASURES.
+    //
+    // `git status --porcelain` includes UNTRACKED files, and tsup writes its own temporary bundled
+    // config into the repo while this very function runs — so the check observed the build tool's
+    // scratch file and stamped `dirty` on every build of a clean checkout. A detector written inside
+    // the thing it detects.
+    //
+    // `git diff --quiet HEAD` asks the question that actually matters: do the TRACKED bytes
+    // correspond to the commit being stamped? Untracked files are by definition not in the commit.
+    //
+    // THE LIMIT: a new, untracked source file that the bundle imports would change the output and
+    // not show here. That is narrow — an import of an untracked file fails typecheck and CI — but it
+    // is real, and it is why this says `clean` rather than `reproducible`.
+    execFileSync('git', ['diff', '--quiet', 'HEAD'], { stdio: 'ignore' });
+    return 'clean';
+  } catch (e) {
+    // `git diff --quiet` EXITS 1 WHEN THERE ARE DIFFERENCES, which is not an error — it is the
+    // answer. Distinguished from git being absent, which is the third state.
+    const code = (e as { status?: number }).status;
+    return code === 1 ? 'dirty' : 'unknown';
   }
 })();
 const BUILT_AT = new Date().toISOString();
