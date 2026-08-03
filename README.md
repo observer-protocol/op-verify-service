@@ -73,3 +73,61 @@ Configuration is env-only (see `src/server.ts` header). The signer refuses to st
 ```
 npm install && npm test
 ```
+
+## Verification is open (2026-08-03)
+
+`POST /v1/verify` requires **no bearer token**. It takes an artifact as **input** and retrieves
+nothing — there is no lookup by identifier and no query surface — so an open verifier with nothing to
+verify returns nothing, and a caller can only check a credential it already holds. A token *we* issue
+would make a skeptic's ability to check our work depend on our permission, which is the vendor back
+in the trust path. The 48-line offline verifier in `op-at-specs` already does this with no network
+call at all; gating the hosted one adds friction without adding privacy.
+
+**Rate limited, which is abuse control and not access control:** 60/min per caller, 600/min global.
+The per-caller limit stops one client monopolising a single Node process doing CPU-bound work; the
+global ceiling bounds a distributed flood, which the per-caller limit does nothing about. A 429 says
+come back, not no.
+
+**The caller key is `CF-Connecting-IP`**, and that is only safe because of a checkable fact: this
+service binds `127.0.0.1` and port 8091 is closed from the internet, so the only path in is the
+cloudflared tunnel and nobody else can reach the origin to forge the header. **If that changes — a
+`0.0.0.0` bind, a second ingress — the assumption is false**, and the global ceiling is what bounds
+the damage.
+
+**Opening it made the engine-floor interlock unconditional.** It used to return early when no token
+was configured, on the reasoning that a token is "the moment a real caller can get a verdict". Every
+moment is now that moment and there is never a token, so the condition would have left the interlock
+permanently disarmed.
+
+### Verified live, from outside, unauthenticated
+
+```
+POST https://verify.observerprotocol.org/v1/verify   ->  200
+  identity.valid : true
+  mandate.valid  : false   (issuer not on the allowlist)
+  proof          : signed by did:web:observerprotocol.org#key-7
+```
+
+### Schema allowlist: v2.2 added
+
+`v2.1, v2.2, v2.3, v2.4, v2.5, v2.6`. v2.2 was the single gap in an otherwise contiguous run while the
+API's own `PINNED.json` already pinned v2.1–v2.4 — two components disagreeing about one version.
+
+**Observed rather than read off `/health`:**
+
+| | before | after |
+|---|---|---|
+| `/credentials/maxi-0001-trading-mandate.json` (declares v2.2) | `credentialSchema.id … v2.2.json is not in the schema allowlist` | allowlist cleared; now fails on `authorizationLevel policy requires authorizationConfig.policy` — a substantive defect in the credential, not a config gap |
+| unversioned `v2.json` | rejected | **still rejected** — the `cred-bad-schema.json` negative fixture in four repos stays armed |
+
+**The two published credentials carrying no `credentialSchema`** —
+`maxi-0001-policy-eval-mainnet-20260623` and `maxi-0001-wdk-demo-pec` — are rejected, but **not by the
+allowlist**. They fail earlier, at the structure gate: `credentialSchema must be { id, type:
+"JsonSchema" }`. Adding v2.2 changes nothing for them, and neither would adding any other version.
+
+### Where the allowlist lives, and why that is a gap
+
+`OP_VERIFY_SCHEMA_ALLOWLIST` in `/etc/op-verify/env` on the box — **not in this repo, and not in any
+repo.** The value above was set by hand with `sudo`. Nothing reproduces it, nothing reviews a change
+to it, and `/health` reporting it is the only way to see what it is. That is the same class as the
+missing deploy path and is not fixed here.
