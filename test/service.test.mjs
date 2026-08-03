@@ -142,7 +142,18 @@ test('context: opaque correlation echoed verbatim onto allow AND deny outcomes',
   assert.equal(none.context, undefined, 'absent when the caller sends no context');
 });
 
-test('fail-closed default: empty token list denies all AND announces itself at boot', async () => {
+// ─── VERIFICATION IS OPEN, BY RULING ────────────────────────────────────────────────────────────
+//
+// This suite used to assert the opposite: that an empty token list denied everyone, and that boot
+// warned it would 401 all callers. Both were true and both were the fail-closed posture of a service
+// nobody could use — op-verify 401'd EVERY caller for its whole life, including the public
+// verify.observerprotocol.org.
+//
+// POST /v1/verify takes an artifact as INPUT and retrieves nothing: no lookup by identifier, no query
+// surface. So an open verifier with nothing to verify returns nothing, and a caller can only check a
+// credential it already holds. A token WE issue would make a skeptic's ability to check our work
+// depend on our permission — the vendor back in the trust path the product exists to remove.
+test('OPEN: no token required, and boot announces the posture rather than a 401 default', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'opverify-noauth-'));
   const skp = generateKeyPairSync('ed25519');
   const sPub = Buffer.from(skp.publicKey.export({ format: 'jwk' }).x, 'base64url');
@@ -159,23 +170,45 @@ test('fail-closed default: empty token list denies all AND announces itself at b
   process.env.PORT = '18092';
 
   const warnings = [];
+  const logs = [];
   const origWarn = console.warn;
+  const origLog = console.log;
   console.warn = (...a) => warnings.push(a.join(' '));
+  console.log = (...a) => logs.push(a.join(' '));
   let server;
   try {
     const { main } = await import('../dist/server.js');
     server = await main();
   } finally {
     console.warn = origWarn;
+    console.log = origLog;
   }
-  assert.ok(warnings.some((w) => /no bearer tokens configured/i.test(w) && /401/.test(w)), 'boot must warn loudly when no tokens are configured');
+  // THE OLD WARNING MUST BE GONE, not merely unasserted. A boot line saying every request will 401
+  // is worse than no line at all once they do not: it tells an operator the endpoint is closed.
+  assert.ok(!warnings.some((w) => /no bearer tokens configured/i.test(w)),
+    'the fail-closed 401 warning must not survive the endpoint being opened');
+  assert.ok(logs.some((l) => /OPEN/.test(l) && /rate limited/i.test(l)),
+    'boot must announce the open posture and the limits');
 
   const url = 'http://127.0.0.1:18092/v1/verify';
   const body = JSON.stringify({ agentDid: 'did:web:x', mandate: {} });
-  // No configuration grants access: arbitrary token, empty bearer, no header all 401.
-  for (const headers of [{ authorization: 'Bearer anything-at-all' }, { authorization: 'Bearer ' }, {}]) {
+  // NO HEADER, A NONSENSE TOKEN, AN EMPTY BEARER — none of them is an access decision any more, so
+  // none may 401. Each is asserted separately: a single case would pass against a handler that
+  // happened to ignore one shape.
+  for (const headers of [{}, { authorization: 'Bearer anything-at-all' }, { authorization: 'Bearer ' }]) {
     const res = await fetch(url, { method: 'POST', body, headers });
-    assert.equal(res.status, 401, `empty token list must deny (headers=${JSON.stringify(headers)})`);
+    assert.notEqual(res.status, 401, `an open endpoint must not 401 (headers=${JSON.stringify(headers)})`);
+    // AND IT RETURNS A VERDICT, which is the property "open" actually means. Asserting only "not
+    // 401" would pass against a handler that 500s on everything — a service that answers nobody for
+    // a different reason. This credential does not verify, so the verdict is a DENY, and a deny is a
+    // real answer: the caller learns something.
+    assert.equal(res.status, 200, `an open endpoint answers (headers=${JSON.stringify(headers)})`);
+    // THE RESPONSE SHAPE IS { identity, mandate, ... , proof } — the same one the HTTP-surface test
+    // below asserts. This credential does not verify, so identity is INVALID, and that is a real
+    // answer: the caller learns something rather than learning who they are not.
+    const verdict = await res.json();
+    assert.equal(verdict.identity?.valid, false, 'an unverifiable identity must be reported invalid');
+    assert.ok(verdict.proof, 'and the verdict must be signed — an unsigned verdict is not evidence');
   }
   server.close();
 });
@@ -210,16 +243,18 @@ test('interlock: satisfied above the floor, and still refuses when the engine is
   // Distinct port per start: close() is async, so reusing one port races EADDRINUSE.
   const closed = (srv) => new Promise((r) => srv.close(r));
 
-  // No tokens: starts at any engine version. Fail-closed 401, not a failure.
+  // ─── THE INTERLOCK IS UNCONDITIONAL NOW, AND OPENING THE ENDPOINT IS WHY ──────────────────
+  //
+  // It used to return early when no token was configured, on the stated reasoning that a token is
+  // "the moment a real caller can get a verdict". Verification is open, so EVERY moment is that
+  // moment — and leaving the condition would have left the interlock permanently disarmed, since
+  // there is now never a token. A control that stops running because its input stopped arriving.
+  //
+  // WITH NO TOKENS AND AN ENGINE ABOVE THE FLOOR IT STARTS, which is the case that used to be
+  // "dormant" and is now the only case there is.
+  assert.ok(!belowFloor, `expected engine ${ENGINE_VERSION} to be at or above the ${FLOOR} floor`);
   process.env.PORT = '18093';
   process.env.OP_VERIFY_BEARER_TOKENS = '';
-  await closed(await main());
-
-  // Tokens present, engine at or above the floor: the interlock is SATISFIED
-  // rather than dormant. Before the pin move this same call refused.
-  assert.ok(!belowFloor, `expected engine ${ENGINE_VERSION} to be at or above the ${FLOOR} floor`);
-  process.env.PORT = '18095';
-  process.env.OP_VERIFY_BEARER_TOKENS = 'a-minted-token';
   await closed(await main());
 
   // The refusal path must still work. Rather than fake a version, run from a cwd
@@ -229,14 +264,19 @@ test('interlock: satisfied above the floor, and still refuses when the engine is
   try {
     process.chdir(mkdtempSync(join(tmpdir(), 'opverify-noengine-')));
     process.env.PORT = '18094';
+    // NO TOKENS, which is the state the old interlock returned early on. If the condition came
+    // back, this rejects nothing and the test fails — which is the point of setting it here.
+    process.env.OP_VERIFY_BEARER_TOKENS = '';
     await assert.rejects(
       () => main(),
       (err) => {
         assert.match(err.message, /could not be determined/);
-        assert.match(err.message, /Refusing to serve authenticated traffic/);
+        // NOT "authenticated traffic" any more — there is none. The refusal is about serving a
+        // verdict at all on an engine we cannot identify.
+        assert.match(err.message, /Refusing to serve verification on an unidentified engine/);
         return true;
       },
-      'an unidentifiable engine must refuse while tokens are configured',
+      'an unidentifiable engine must refuse to start, token or no token',
     );
   } finally {
     process.chdir(cwd);
@@ -270,15 +310,27 @@ test('HTTP surface: auth, signed response, proof verifies against the signer DID
   const correlation = { correlationId: 'arbis_run_http_1', fingerprint: 'structural:cafe' };
   const body = JSON.stringify({ agentDid: agent.did, mandate: makeMandate(principal, agent.did), proposal: { counterparty: 'merchant-1', amount: '20', currency: 'USD' }, context: correlation });
 
+  // ─── NO AUTH, AND A LEFTOVER TOKEN CHANGES NOTHING ────────────────────────────────────────
+  //
+  // This asserted 401 for no header and 401 for a wrong token. Both are now wrong by ruling: the
+  // endpoint is open. Asserted in three shapes rather than one, because a handler that happened to
+  // ignore a single shape would pass a single case.
+  //
+  // THE THIRD IS THE ONE THAT MATTERS. A configured-but-unread token must not grant anything the
+  // other two lack — if it did, the token would still be a control and the endpoint would be open
+  // only for people who did not send one.
   const noAuth = await fetch(url, { method: 'POST', body });
-  assert.equal(noAuth.status, 401);
-
-  // an unknown token is 401 (only the configured token works)
+  assert.equal(noAuth.status, 200, 'no header: an open endpoint answers');
   const badTok = await fetch(url, { method: 'POST', body, headers: { authorization: 'Bearer not-a-real-token' } });
-  assert.equal(badTok.status, 401);
+  assert.equal(badTok.status, 200, 'a wrong token is not a wrong caller — nothing reads it');
 
   const res = await fetch(url, { method: 'POST', body, headers: { authorization: 'Bearer arbis-test-token' } });
   assert.equal(res.status, 200);
+  assert.deepEqual(
+    await (await fetch(url, { method: 'POST', body })).json().then((o) => [o.identity.valid, o.mandate.valid]),
+    await res.clone().json().then((o) => [o.identity.valid, o.mandate.valid]),
+    'the configured token grants nothing an anonymous caller does not already get',
+  );
   const out = await res.json();
   assert.equal(out.identity.valid, true, out.identity.reason);
   assert.equal(out.mandate.valid, true, out.mandate.reason);

@@ -114,23 +114,31 @@ function installedEngineVersion(): string | null {
  * state, not a pass — serving on an engine we cannot identify is the thing this
  * interlock exists to prevent.
  */
-function assertEngineFloor(tokenCount: number): void {
-  if (tokenCount === 0) return;
+function assertEngineFloor(): void {
+  // ─── UNCONDITIONAL NOW, AND THAT IS FORCED BY OPENING THE ENDPOINT ──────────────────────────
+  //
+  // This read `if (tokenCount === 0) return;` and its own comment gave the reason: the gate "only
+  // bites when a token exists, because that is the moment a real caller can get a verdict."
+  //
+  // VERIFICATION IS OPEN, SO EVERY MOMENT IS THAT MOMENT. Leaving the token condition in place would
+  // have left the interlock permanently disarmed — tokenCount is now always 0 — and a service on an
+  // engine below the floor would serve verdicts to the internet while the check that exists to stop
+  // it returned early. A control that stops running because its input stopped arriving is the defect
+  // this estate keeps finding, and this is the shape it would have taken here.
   const found = installedEngineVersion();
   if (found === null) {
     throw new Error(
-      `${tokenCount} bearer token(s) configured but the bundled ` +
-      `@observer-protocol/policy-engine version could not be determined. ` +
-      `Refusing to serve authenticated traffic on an unidentified engine. ` +
-      `Run from the service's install directory, or clear OP_VERIFY_BEARER_TOKENS.`,
+      `The bundled @observer-protocol/policy-engine version could not be determined. Refusing to ` +
+      `serve verification on an unidentified engine: a verdict is only worth what the evaluator ` +
+      `behind it is, and an unknown version is a failure state rather than a pass. Run from the ` +
+      `service's install directory.`,
     );
   }
   if (cmpVersion(found, MIN_ENGINE_VERSION) < 0) {
     throw new Error(
-      `${tokenCount} bearer token(s) configured but @observer-protocol/policy-engine ` +
-      `is ${found}, below the ${MIN_ENGINE_VERSION} floor this service requires. ` +
-      `Move the pin first, then mint the token — not the other way round. ` +
-      `Clearing OP_VERIFY_BEARER_TOKENS returns the service to its fail-closed 401 state.`,
+      `@observer-protocol/policy-engine is ${found}, below the ${MIN_ENGINE_VERSION} floor this ` +
+      `service requires. Refusing to start. Move the pin first — the endpoint is open, so there is ` +
+      `no token to withhold and no fail-closed state to fall back to.`,
     );
   }
 }
@@ -144,7 +152,57 @@ const env = (k: string): string => {
 const MAX_BODY = 256 * 1024; // a mandate is a few KB; anything huge is abuse
 const MAX_CONTEXT = 4 * 1024; // opaque correlation echo: a trace id, not a payload
 const RATE_WINDOW_MS = 60_000;
-const RATE_MAX = 120; // per token per minute
+
+// ─── ABUSE CONTROL, NOT ACCESS CONTROL ────────────────────────────────────────────────────────
+//
+// Verification is OPEN: POST /v1/verify takes an artifact as input, it does not retrieve one. There
+// is no lookup by identifier and no query surface, so an open verifier with nothing to verify
+// returns nothing — a caller can only check a credential they already hold. And a verifier that
+// needs a token WE issue makes a skeptic's ability to check our work depend on our permission,
+// which puts the vendor back in the trust path the product exists to remove.
+//
+// So these limits protect the BOX, not the data. Two of them, because they stop different things:
+//
+//   PER CALLER, 60/min — one client cannot monopolise the process. Verification is CPU-bound
+//   (Ed25519 verify, JSON-schema validation, and a DID fetch on a cache miss), and 60/min is
+//   generous for a human checking credentials or a CI job while being cheap to serve.
+//
+//   GLOBAL, 600/min — the per-caller limit does nothing against a distributed flood, and this is a
+//   single Node process. The ceiling means no traffic pattern can take the box down; at worst it
+//   makes verification slow for everyone, which is a better failure than making it absent.
+//
+// A 429 IS NOT A REFUSAL TO VERIFY. It says come back, not no.
+const RATE_MAX = 60;          // per caller per minute
+const RATE_MAX_GLOBAL = 600;  // whole service per minute
+
+/** WHO IS CALLING, for rate limiting only. Never for authorisation — nothing here is authorised.
+ *
+ * ─── WHY THE SOCKET ADDRESS IS USELESS HERE ───────────────────────────────────────────────────
+ *
+ * This service binds 127.0.0.1 and is not reachable from the internet; the only path in is the
+ * cloudflared tunnel. So `req.socket.remoteAddress` is 127.0.0.1 for EVERY caller, and keying on it
+ * would make one shared bucket that the first busy client empties for everybody.
+ *
+ * ─── AND WHY THE HEADER IS TRUSTWORTHY, WHICH IT USUALLY IS NOT ───────────────────────────────
+ *
+ * `CF-Connecting-IP` is normally forgeable and normally must not be trusted. It is trustworthy HERE
+ * for a specific, checkable reason: cloudflared sets it, and there is no direct route to port 8091
+ * for anyone to set it themselves — verified, the listener is loopback-only and the port is closed
+ * from outside. IF THAT EVER CHANGES — if this binds 0.0.0.0, or a second ingress appears — this
+ * assumption is false and an attacker rotates the header to get an unlimited number of buckets.
+ * The global ceiling is what bounds the damage in that case, which is half of why it exists.
+ */
+function callerKey(req: { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string | undefined } }): string {
+  const cf = req.headers['cf-connecting-ip'];
+  if (typeof cf === 'string' && cf.length > 0) return `cf:${cf}`;
+  const xff = req.headers['x-forwarded-for'];
+  const first = (Array.isArray(xff) ? xff[0] : xff)?.split(',')[0]?.trim();
+  if (first) return `xff:${first}`;
+  // DEGRADED, AND NAMED AS SUCH. Reaching here means neither header arrived, so every caller shares
+  // one bucket. The prefix makes that visible to anyone reading the map rather than leaving a global
+  // limit looking like a per-caller one.
+  return `sock:${req.socket.remoteAddress ?? 'unknown'}`;
+}
 
 function tokenOk(header: string | undefined, tokens: string[]): boolean {
   if (!header?.startsWith('Bearer ')) return false;
@@ -154,6 +212,8 @@ function tokenOk(header: string | undefined, tokens: string[]): boolean {
     return expected.length === presented.length && timingSafeEqual(expected, presented);
   });
 }
+
+let globalWindow: { count: number; windowStart: number } | undefined;
 
 export async function main(): Promise<Server> {
   const signer: ResponseSigner = await createResponseSigner({
@@ -178,7 +238,7 @@ export async function main(): Promise<Server> {
   // mechanically on the next line, so a token added here against an old engine
   // stops the service rather than serving verdicts from it.
   const tokens = (process.env.OP_VERIFY_BEARER_TOKENS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  assertEngineFloor(tokens.length);
+  assertEngineFloor();
   const rate = new Map<string, { count: number; windowStart: number }>();
 
   const server = createServer((req, res) => {
@@ -206,13 +266,23 @@ export async function main(): Promise<Server> {
     }
     if (req.method !== 'POST' || req.url !== '/v1/verify') return void reply(404, { error: 'POST /v1/verify' });
 
-    const auth = req.headers.authorization;
-    if (!tokenOk(auth, tokens)) return void reply(401, { error: 'missing or invalid bearer token' });
-    const bucketKey = (auth as string).slice(7, 27);
+    // NO AUTHENTICATION. See RATE_MAX above for why, and note what is NOT here: there is no
+    // identifier to look a credential up by, so an unauthenticated caller cannot ask this service
+    // for anything it does not already hold.
     const now = Date.now();
+
+    if (!globalWindow || now - globalWindow.windowStart > RATE_WINDOW_MS) {
+      globalWindow = { count: 1, windowStart: now };
+    } else if (++globalWindow.count > RATE_MAX_GLOBAL) {
+      return void reply(429, { error: 'service rate limit exceeded', retryAfterMs: RATE_WINDOW_MS - (now - globalWindow.windowStart) });
+    }
+
+    const bucketKey = callerKey(req);
     const bucket = rate.get(bucketKey);
     if (!bucket || now - bucket.windowStart > RATE_WINDOW_MS) rate.set(bucketKey, { count: 1, windowStart: now });
-    else if (++bucket.count > RATE_MAX) return void reply(429, { error: 'rate limit exceeded' });
+    else if (++bucket.count > RATE_MAX) {
+      return void reply(429, { error: 'rate limit exceeded', retryAfterMs: RATE_WINDOW_MS - (now - bucket.windowStart) });
+    }
 
     let size = 0;
     let data = '';
@@ -267,14 +337,23 @@ export async function main(): Promise<Server> {
   const host = process.env.HOST ?? '127.0.0.1';
   await new Promise<void>((resolve) => server.listen(port, host, resolve));
   console.log(`op-verify-service on ${host}:${port} signing as ${signer.verificationMethod}`);
-  if (tokens.length === 0) {
-    // Loud on purpose: a deployment with no tokens is healthy and fail-closed,
-    // but it denies every real caller. Without this line a lost/absent env file
-    // looks like a partner-side 401 while /health stays green. Announce it here.
+  // WHAT IS TRUE OF THIS ENDPOINT NOW, announced at startup because it is a posture rather than a
+  // setting. The previous line warned that an empty token list meant every request would 401; that
+  // was accurate and is now the opposite of the design.
+  console.log(
+    `POST /v1/verify is OPEN — no bearer token. Verification takes an artifact as input and ` +
+    `retrieves nothing: there is no lookup by identifier, so a caller can only check a credential ` +
+    `it already holds. Rate limited to ${RATE_MAX}/min per caller and ${RATE_MAX_GLOBAL}/min ` +
+    `overall — abuse control, not access control.`,
+  );
+  if (tokens.length > 0) {
+    // A LEFTOVER TOKEN IS NOT AN ERROR AND IS NOT A CONTROL EITHER. Nothing reads it any more, so
+    // an operator who believes the endpoint is gated because the env file still lists one should
+    // read this instead of discovering it from traffic.
     console.warn(
-      'WARNING: no bearer tokens configured (OP_VERIFY_BEARER_TOKENS empty) — ' +
-      'ALL /v1/verify requests will 401. This is fail-closed, not an outage; ' +
-      '/health stays green. If a partner is provisioned, the env file is missing.',
+      `WARNING: ${tokens.length} bearer token(s) are configured and NOTHING READS THEM. ` +
+      'The endpoint is open by ruling; these tokens gate nothing. Remove OP_VERIFY_BEARER_TOKENS ' +
+      'so the env file does not imply a control that does not exist.',
     );
   }
   return server;
