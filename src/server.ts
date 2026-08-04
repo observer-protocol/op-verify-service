@@ -222,12 +222,37 @@ function allowlistReport(cfg: { schemaAllowlist: string[]; issuerAllowlist: stri
   };
 }
 
+/** Whether a forwarded-client-IP header may be believed, decided by WHERE WE LISTEN.
+ *
+ * The comment above states the condition that makes `CF-Connecting-IP` trustworthy: cloudflared sets
+ * it and "there is no direct route to port 8091 for anyone to set it themselves — verified, the
+ * listener is loopback-only". It then names the exact event that falsifies it: "IF THAT EVER CHANGES
+ * — if this binds 0.0.0.0, or a second ingress appears".
+ *
+ * That change has now happened. The self-hosted container binds 0.0.0.0 so a published port can
+ * reach it, and a caller on that port can send any header it likes — including one naming a
+ * different client on every request, which is an unlimited number of rate-limit buckets.
+ *
+ * So the invariant is enforced instead of asserted. Bound to loopback, the only writer that can
+ * reach us is a local reverse proxy and the headers are believed. Bound anywhere else, they are
+ * ignored and the bucket key is the socket address, which no caller can forge.
+ *
+ * Narrowing, not loosening: the hosted deployment leaves HOST unset, keeps its loopback bind, and
+ * behaves exactly as before.
+ */
+const TRUST_FORWARDED_FOR: boolean = (() => {
+  const h = process.env.HOST ?? '127.0.0.1';
+  return h === '127.0.0.1' || h === 'localhost' || h === '::1';
+})();
+
 function callerKey(req: { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string | undefined } }): string {
-  const cf = req.headers['cf-connecting-ip'];
-  if (typeof cf === 'string' && cf.length > 0) return `cf:${cf}`;
-  const xff = req.headers['x-forwarded-for'];
-  const first = (Array.isArray(xff) ? xff[0] : xff)?.split(',')[0]?.trim();
-  if (first) return `xff:${first}`;
+  if (TRUST_FORWARDED_FOR) {
+    const cf = req.headers['cf-connecting-ip'];
+    if (typeof cf === 'string' && cf.length > 0) return `cf:${cf}`;
+    const xff = req.headers['x-forwarded-for'];
+    const first = (Array.isArray(xff) ? xff[0] : xff)?.split(',')[0]?.trim();
+    if (first) return `xff:${first}`;
+  }
   // DEGRADED, AND NAMED AS SUCH. Reaching here means neither header arrived, so every caller shares
   // one bucket. The prefix makes that visible to anyone reading the map rather than leaving a global
   // limit looking like a per-caller one.

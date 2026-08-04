@@ -61,7 +61,42 @@ verifying, it is agreeing. The shipped list includes `did:web:bitcoinsingularity
 sample credential is issued by it, and it is *not* Observer Protocol — which is exactly why the
 issuer is pinned rather than read out of the credential being checked.
 
-## What this deployment does not do
+## What it needs from the network
+
+Measured on a running container, not inferred. After verifying both sample credentials the cache
+held exactly two documents, and they are the only things it fetched:
+
+| fetched at run time | why |
+|---|---|
+| `https://bitcoinsingularity.ai/.well-known/did.json` | the **issuer's** DID document, to get the key the proof names |
+| `https://observerprotocol.org/agents/maxi-0001/did.json` | the **subject's** DID document, to bind the mandate to the agent |
+
+**The schema URLs are never fetched.** `OP_VERIFY_SCHEMA_ALLOWLIST` is compared as a string, so a
+blocked `observerprotocol.org/schemas/...` costs you nothing.
+
+**Revocation status lists are fetched only when a credential carries a `credentialStatus` entry.**
+Neither sample does, and the verdict says so in `notes`. A credential that does carry one adds its
+status-list URL to the list above.
+
+Build time additionally needs `registry.npmjs.org`. Nothing else, ever — no Observer API, no
+telemetry, no licence check.
+
+### Behind a proxy that blocks those hosts
+
+Also measured, by pointing both DID hosts at a dead address:
+
+- **The service still starts.** `GET /health` answers 200. The failure appears at verification time,
+  not at boot, so "the container is up" is not evidence that it can verify.
+- **Cold cache: it fails closed and says why.** `mandate.valid: false`, reason
+  `[proof] unreachable (fetch failed) and no cached copy exists`. It does not guess and it does not
+  pass.
+- **Warm cache: it verifies, and discloses that it did so from cache.** The verdict carries
+  `refresh of https://... failed (fetch failed); served from cache aged 0.0h (limit 24h)`. Past that
+  24h staleness limit the cached answer stops being used — that limit is configuration, and this
+  paragraph is the only claim here I have not run a clock forward to observe.
+
+So the realistic first failure behind a corporate proxy is a **cold** container that boots healthy
+and then refuses every credential. Allowlist the two DID-document hosts above and it works.
 
 - **No issuance.** Nothing from `observer-protocol-api` or `op-mcp-payment-server` is present, so
   there is no issuance capability to disable — it was never compiled in.

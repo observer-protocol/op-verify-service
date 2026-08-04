@@ -58,8 +58,20 @@ RUN mkdir -p /var/lib/op-verify && chown -R node:node /var/lib/op-verify /app
 VOLUME /var/lib/op-verify
 
 USER node
+# HOST=0.0.0.0 IS REQUIRED, AND IT IS NOT A LOOSENING OF THE HOSTED POSTURE.
+#
+# The server defaults to 127.0.0.1. Inside a container that means the loopback interface OF THE
+# CONTAINER, which a published port cannot reach — the process is up, the healthcheck passes because
+# it runs inside, and every request from the host is refused at the socket. Measured: `curl` from the
+# host returned exit 52 with the container reporting healthy.
+#
+# Binding 0.0.0.0 here exposes the service only to Docker's published-port mapping, which is what
+# `ports:` in compose.yaml controls. It also switches off the forwarded-client-IP trust in
+# callerKey() — see TRUST_FORWARDED_FOR in src/server.ts. The hosted deployment leaves HOST unset and
+# is unaffected.
 ENV NODE_ENV=production \
     PORT=8091 \
+    HOST=0.0.0.0 \
     OP_VERIFY_SIGNING_KEY_PATH=/var/lib/op-verify/signer.pem \
     OP_VERIFY_CACHE_DIR=/var/lib/op-verify/cache
 EXPOSE 8091
