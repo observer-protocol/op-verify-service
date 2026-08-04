@@ -1,0 +1,11 @@
+# Keep the build context small and keep local state out of the image.
+node_modules
+dist
+.git
+.gitignore
+*.log
+
+# Never let a local key reach a layer. The container generates its own did:key at first run; a
+# stray PEM copied into an image would be baked into every distributed copy of it.
+*.pem
+*.key

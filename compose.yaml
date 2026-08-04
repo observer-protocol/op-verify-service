@@ -1,0 +1,67 @@
+# Self-hosted Observer Protocol verifier.
+#
+#   docker compose up --build
+#   ./compose-smoke.sh
+#
+# One service. No database, no queue, no Observer account, no API key. Everything it verifies
+# against is public and stays public: issuer DID documents, the frozen schema URLs, and static
+# revocation status lists.
+
+services:
+  verify:
+    build:
+      context: .
+      args:
+        # Provenance the image cannot work out for itself — there is no git inside it. These are
+        # read by tsup.config.ts ONLY when git is absent, so a normal host build still stamps the
+        # real tree and these are ignored. Resolve to 'unknown' outside a checkout, which is the
+        # honest answer rather than a wrong one.
+        OP_BUILD_COMMIT: ${OP_BUILD_COMMIT:-unknown}
+        OP_BUILD_BRANCH: ${OP_BUILD_BRANCH:-unknown}
+        OP_BUILD_DIRTY: ${OP_BUILD_DIRTY:-unknown}
+    image: op-verify-service:local
+    ports:
+      - "${OP_VERIFY_PORT:-8091}:8091"
+    environment:
+      # ─── ISSUERS YOU TRUST, PINNED ────────────────────────────────────────────────────────
+      #
+      # A verifier that accepts whoever the credential names as its issuer is not verifying, it is
+      # agreeing. This list is what you expect; anything else is denied before the signature is
+      # read. Both entries resolve publicly today.
+      #
+      # did:web:bitcoinsingularity.ai is here because the sample credential below is issued by it,
+      # and it is NOT Observer Protocol. That is the point of pinning: the issuer of a credential
+      # is a fact about the credential, not a permission it grants itself.
+      OP_VERIFY_ISSUER_ALLOWLIST: >-
+        did:web:observerprotocol.org,did:web:bitcoinsingularity.ai
+
+      # ─── SCHEMA VERSIONS THIS DEPLOYMENT ACCEPTS ──────────────────────────────────────────
+      #
+      # Frozen, immutable URLs. A credential declaring a schema outside this list is refused —
+      # the deployment decides what it understands, not the credential.
+      OP_VERIFY_SCHEMA_ALLOWLIST: >-
+        https://observerprotocol.org/schemas/delegation/v2.1.json,
+        https://observerprotocol.org/schemas/delegation/v2.2.json,
+        https://observerprotocol.org/schemas/delegation/v2.3.json,
+        https://observerprotocol.org/schemas/delegation/v2.4.json,
+        https://observerprotocol.org/schemas/delegation/v2.5.json,
+        https://observerprotocol.org/schemas/delegation/v2.6.json
+
+      # OP_VERIFY_BEARER_TOKENS is deliberately unset. POST /v1/verify takes an artifact as input
+      # and retrieves nothing — there is no lookup by identifier, so a caller can only check a
+      # credential it already holds. A token here would gate a check anyone can already run
+      # offline from the npm package, which is the dead end this container exists to remove.
+
+      # OP_VERIFY_SIGNING_KEY_PATH / OP_VERIFY_SIGNING_VM are set by the entrypoint, which
+      # generates a did:key on first run. See scripts/gen-did-key.mjs for why it is not #key-7.
+
+    volumes:
+      # Keeps the signing identity stable across `compose down`. Without it, every recreate signs
+      # verdicts as a different did:key, and a verdict you kept from yesterday no longer verifies
+      # against the key the service now advertises.
+      - op-verify-state:/var/lib/op-verify
+
+    restart: unless-stopped
+
+volumes:
+  op-verify-state:

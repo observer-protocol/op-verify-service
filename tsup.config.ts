@@ -24,8 +24,24 @@ const shell = (cmd: string, args: string[]): string => {
 //
 // Embedded in the BUNDLE means the artifact carries its own identity. Copy it anywhere, and it still
 // says what it is.
-const COMMIT = shell('git', ['rev-parse', 'HEAD']);
-const BRANCH = shell('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
+/** Git if it is here, otherwise what the builder passed in, otherwise 'unknown'.
+ *
+ * GIT WINS WHERE BOTH EXIST, and the order is the point. Git describes the tree actually being
+ * compiled; the env var is a CLAIM by whoever invoked the build. Preferring the claim would let a
+ * stale or wrong `--build-arg` overwrite a fact, which is the drift this stamp exists to catch.
+ *
+ * The fallback exists for container builds, where there is no git and every image would otherwise
+ * stamp 'unknown'. See the Dockerfile. Note what this does NOT establish: a passed-in commit is
+ * only as good as the caller, so it says where the bytes came from, not that they match.
+ */
+const stamp = (cmd: string, args: string[], envKey: string): string => {
+  const fromGit = shell(cmd, args);
+  if (fromGit !== 'unknown') return fromGit;
+  return process.env[envKey]?.trim() || 'unknown';
+};
+
+const COMMIT = stamp('git', ['rev-parse', 'HEAD'], 'OP_BUILD_COMMIT');
+const BRANCH = stamp('git', ['rev-parse', '--abbrev-ref', 'HEAD'], 'OP_BUILD_BRANCH');
 
 /** THREE OUTCOMES, NOT TWO, and collapsing them is what broke this the first time.
  *
@@ -62,7 +78,11 @@ const DIRTY_STATE: 'clean' | 'dirty' | 'unknown' = (() => {
     // `git diff --quiet` EXITS 1 WHEN THERE ARE DIFFERENCES, which is not an error — it is the
     // answer. Distinguished from git being absent, which is the third state.
     const code = (e as { status?: number }).status;
-    return code === 1 ? 'dirty' : 'unknown';
+    if (code === 1) return 'dirty';
+    // git absent (container build). Accept only the two values that mean something; anything else,
+    // including an unset var, stays 'unknown' rather than being coerced into a reassuring 'clean'.
+    const passed = process.env.OP_BUILD_DIRTY?.trim();
+    return passed === 'clean' || passed === 'dirty' ? passed : 'unknown';
   }
 })();
 const BUILT_AT = new Date().toISOString();
