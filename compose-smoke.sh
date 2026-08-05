@@ -38,6 +38,43 @@ case "$SIGNING_VM" in
 esac
 echo
 
+# ─── 1b. it can actually reach the issuers it is pinned to ───────────────────────────────────
+#
+# STEP 1 PASSING IS NOT EVIDENCE FOR THIS. /health answers whenever the process is up, including on
+# a cold cache behind a corporate proxy where every credential below will be refused. That is the
+# first thing a new reader hits, and before this step it presented as a bad credential rather than
+# as a blocked network. Checked SEPARATELY and named separately, so the two failures never wear
+# each other's error message.
+echo "1b. the verifier can reach its pinned issuers"
+READY_CODE=$(curl -s -o "$TMP/ready.json" -w '%{http_code}' --max-time 20 "$BASE/ready")
+if [ "$READY_CODE" = "200" ]; then
+  pass "GET /ready 200 — every pinned issuer DID resolves"
+  if python3 -c "
+import json,sys
+d=json.load(open('$TMP/ready.json'))
+sys.exit(0 if d.get('degraded') else 1)" 2>/dev/null; then
+    echo "  NOTE  ready, but DEGRADED — not every issuer was fetched live. Per-issuer state:"
+    python3 -c "
+import json
+for i in json.load(open('$TMP/ready.json'))['issuers']:
+    print('          %s  %s%s' % (i['state'], i['issuer'], (' — ' + i['note']) if i.get('note') else ''))" 2>/dev/null
+  fi
+elif [ "$READY_CODE" = "503" ]; then
+  fail "GET /ready 503 — the container is running and CANNOT VERIFY ANYTHING."
+  python3 -c "
+import json
+d=json.load(open('$TMP/ready.json'))
+print('        %s' % d.get('reason',''))
+for i in d['issuers']:
+    if not i.get('resolvable'):
+        print('        %s: %s' % (i['issuer'], i.get('error','')))" 2>/dev/null
+  echo "        Steps 2 and 3 below will fail for THIS reason, not because the credentials are bad."
+  echo "        Behind a proxy, allowlist the DID-document hosts named above."
+else
+  fail "GET /ready returned $READY_CODE — expected 200 or 503. An old image predates this endpoint."
+fi
+echo
+
 # ─── 2. a credential that MUST verify ────────────────────────────────────────────────────────
 echo "2. a valid published credential must VERIFY"
 if ! curl -sf --max-time 20 -A "$UA" "$VALID_URL" -o "$TMP/valid.json"; then

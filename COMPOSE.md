@@ -98,25 +98,69 @@ Also measured, by pointing both DID hosts at a dead address:
 So the realistic first failure behind a corporate proxy is a **cold** container that boots healthy
 and then refuses every credential. Allowlist the two DID-document hosts above and it works.
 
-> **OPEN QUESTION — what does `healthy` promise? No owner, no action taken.**
->
-> The `HEALTHCHECK` asks whether the process answers `/health`. On a cold cache behind a blocked
-> proxy that returns **healthy while the service cannot verify anything**, which is a true statement
-> about the process and a misleading one about the deployment. An orchestrator would keep it in
-> rotation; a partner would read green and file the refusals as a credential bug.
->
-> The two readings are both defensible and the choice is not ours to make silently:
->
-> - **`healthy` = the process is up.** DID resolvability is a property of the network, not of this
->   container, and a health check that fails when a third party is unreachable makes an outage
->   elsewhere look like an outage here. Restarting would fix nothing.
-> - **`healthy` = the deployment can do its job.** A verifier that cannot reach any issuer DID
->   document is not serving, whatever the socket says.
->
-> Deliberately unchanged for now. Changing a health contract during a demo week is how a green
-> container starts flapping on someone else's DNS. Recorded here so the next person meets the
-> question rather than the surprise. See the `/health` body, which already reports what was loaded —
-> that is the seam where a readiness signal distinct from liveness would go.
+### `healthy` and `ready` are two questions, and this container answers them separately
+
+**Resolved 2026-08-05. Supersedes the open question recorded on 2026-08-04**, which parked this on
+the grounds that changing a health contract during a demo week is how a green container starts
+flapping on someone else's DNS. The demo turned out to be the argument for the split rather than
+against it: the cold-cache case IS what a viewer meets on their first run, and the recording exists
+to send people to run it. A container that reports healthy while refusing every credential sends
+that viewer to debug their credential.
+
+Both readings were defensible, so neither was discarded. Each got its own endpoint:
+
+| | `GET /health` | `GET /ready` |
+|---|---|---|
+| **Question** | is this process up | can this deployment do its job |
+| **Codes** | always `200` while answering | `200` ready, `503` not ready |
+| **Touches the network** | never | resolves every pinned issuer DID |
+| **Body carries** | `liveness`, the two allowlists, `signingVm`, build stamp, and a **pointer** to `/ready` | `ready`, `degraded`, per-issuer state, the failure verbatim, and the probe's own limits |
+| **Restart would help** | yes, if it fails | usually no: the fault is normally someone else's network |
+
+`/health` keeps the "process is up" reading whole. It opens no socket to anyone else, so a third
+party's outage never presents as ours. It does **not** compute a readiness verdict of its own: it
+carries a pointer and a warning, because one question answered in two places is two answers.
+
+`/ready` probes the **issuer allowlist**, which is the only DID set known before a request arrives.
+The agent DID comes with the request and cannot be pre-checked; a mandate's proof cannot be checked
+without resolving its issuer. So "can I reach my pinned issuers" is "can I verify anything at all".
+
+Per-issuer states, all of which appear in the body:
+
+- `fresh` — fetched live on this probe. The only state that proves reach.
+- `cached` — refresh failed, served from cache inside the 24h limit. Ready, and **degraded**, with
+  the engine's own cache-age note carried verbatim.
+- `unreachable` — no network and no usable cache. **Not ready**, and the thrown error is included
+  so the body names DNS, TLS, proxy or timeout rather than saying "not ready".
+- `offline-override` — `OP_VERIFY_OFFLINE_DIDDOC` is set. Ready and **degraded**: the engine serves
+  one document for *every* `did:web` it is asked about, so in this mode no `did:web` can ever be
+  reported unreachable and readiness cannot detect the failure it exists to detect.
+- `no-network-proof` — `did:key`, derived in memory. Ready and **degraded**: it can never fail, so
+  it is never evidence that anything else would succeed. The key material is decoded at probe time,
+  because `resolveDidKeyDocument` alone accepts `did:key:zzz` and only fails later at signature
+  check — measured, not assumed.
+
+`ready: true` with `degraded: true` means *resolvable*, not *reachable*. Do not read the first
+without the second.
+
+**The `HEALTHCHECK` now points at `/ready`,** so `docker ps` shows `unhealthy` on a cold cache and
+`docker inspect` carries the probe body naming the issuer. The flapping objection does not apply to
+this file: Docker does not restart a standalone container for being unhealthy, and
+`restart: unless-stopped` acts on the process *exiting*, which does not happen here. So the state is
+surfaced and the container is left running, which is the report-without-acting behaviour the parked
+note wanted and could not get from one endpoint.
+
+**Under an orchestrator that acts on health, that reasoning does not carry.** Swarm reschedules on
+unhealthy and Kubernetes kills on a failed `livenessProbe`. There, point the liveness probe at
+`/health` and the readiness probe at `/ready` — the split those systems already model, and the
+reason both endpoints exist.
+
+**What `/ready` does not cover**, printed in every response rather than only here: the agent DID in
+a request is never probed, revocation status lists are fetched during verification and not by this
+probe, and a resolvable issuer says nothing about whether any particular credential will verify.
+
+The probe is memoised for 60s on success and 10s on failure, so a 30s healthcheck interval does not
+put a live request on someone else's DID host twice a minute, and a recovery becomes visible fast.
 
 - **No issuance.** Nothing from `observer-protocol-api` or `op-mcp-payment-server` is present, so
   there is no issuance capability to disable — it was never compiled in.

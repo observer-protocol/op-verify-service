@@ -14,6 +14,15 @@ Three properties, each checkable:
 
 ## API
 
+`GET /health` — liveness. `200` whenever the process is answering. It opens no socket to anyone
+else, so a third party's outage never presents as ours. **A 200 here does not mean this deployment
+can verify anything**; it carries a pointer to `/ready` saying so.
+
+`GET /ready` — readiness. `200` when every pinned issuer DID resolves, `503` when one does not, with
+the per-issuer state and the underlying failure in the body. This is the endpoint that distinguishes
+"your credential is bad" from "this deployment cannot reach the issuer". A `ready: true` carrying
+`degraded: true` means resolvable, not reachable. See COMPOSE.md for the full contract.
+
 `POST /v1/verify` — `Authorization: Bearer <partner token>`
 
 ```json

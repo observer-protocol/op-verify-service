@@ -80,8 +80,31 @@ EXPOSE 8091
 # retrieves nothing, so a caller can only check a credential it already holds. Setting
 # OP_VERIFY_BEARER_TOKENS here would reintroduce the dead end this container exists to remove.
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8091)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# POINTED AT /ready, NOT /health, AND THAT IS THE WHOLE CHANGE.
+#
+# Docker has one health signal, so it has to carry whichever question is more useful to the person
+# reading `docker ps`. For this container that is readiness: the realistic first failure is a cold
+# cache behind a corporate proxy, which is live and refuses every credential. Aimed at /health that
+# reports `healthy` and the reader concludes their credential is bad. Aimed at /ready it reports
+# `unhealthy`, and `docker inspect` carries the probe body naming the issuer that would not resolve.
+#
+# WHAT MADE THIS SAFE, AND IT IS SPECIFIC TO THIS FILE. The objection to failing a healthcheck on a
+# third party's outage is restart flapping. Docker does not restart a standalone container for being
+# unhealthy — `restart: unless-stopped` in compose.yaml acts on the process EXITING, and the process
+# does not exit here. So on this deployment shape an unhealthy container is surfaced and left
+# running, which is exactly the reporting-without-acting behaviour the parked note wanted and could
+# not get from a single endpoint.
+#
+# IF YOU RUN THIS UNDER AN ORCHESTRATOR THAT ACTS ON HEALTH, that reasoning does not carry: Swarm
+# reschedules on unhealthy and Kubernetes kills on a failed livenessProbe. Under those, point the
+# LIVENESS probe at /health and the READINESS probe at /ready, which is the split those systems
+# already model and the reason both endpoints exist separately.
+#
+# Timeout is 10s, not 5s: the probe resolves every pinned issuer concurrently with a 3s per-issuer
+# timeout, and a 5s ceiling would turn one slow DNS answer into a not-ready verdict that is about
+# the probe rather than the deployment.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8091)+'/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/server.js"]

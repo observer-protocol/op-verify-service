@@ -18,6 +18,7 @@ import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { runVerification, type VerifyRequest } from './verify-core.js';
+import { assessReadiness } from './readiness.js';
 import { createResponseSigner, type ResponseSigner } from './signer.js';
 // Namespace import so a missing export is `undefined` rather than a load error:
 // this file must keep working against an engine that predates compareCoreVersion.
@@ -314,6 +315,24 @@ export async function main(): Promise<Server> {
     if (req.method === 'GET' && req.url === '/health') {
       return void reply(200, {
         status: 'ok',
+        // LIVENESS, STATED RATHER THAN IMPLIED. This endpoint answers "is the process up" and
+        // deliberately opens no socket to anyone else, so a third party's outage never presents
+        // as ours and this never suggests a restart that would fix nothing.
+        liveness: {
+          ok: true,
+          means: 'this process is up and answering; no network reachability is implied or tested here',
+        },
+        // THE POINTER IS NOT A SECOND VERDICT. Readiness is computed in exactly one place and
+        // served by exactly one endpoint. If this block restated it, /health and /ready could
+        // disagree and a reader would have two answers to one question.
+        readiness: {
+          endpoint: '/ready',
+          means: 'whether this deployment can currently resolve the issuer DIDs it is pinned to',
+          warning:
+            'A 200 here does NOT mean this deployment can verify anything. A cold cache behind a ' +
+            'blocked proxy is live and refuses every credential. Check /ready before concluding ' +
+            'that a refusal is a problem with your credential.',
+        },
         signingVm: signer.verificationMethod,
         schemaAllowlist: coreCfg.schemaAllowlist,
         issuerAllowlist: coreCfg.issuerAllowlist,
@@ -322,6 +341,23 @@ export async function main(): Promise<Server> {
         ...allowlistReport(coreCfg),
         build: { commit: __BUILD_COMMIT__, dirty: __BUILD_DIRTY__ },
       });
+    }
+    // READINESS: 200 only when every pinned issuer DID resolves, 503 otherwise. The status code is
+    // the signal an orchestrator and a container healthcheck both read; the body is what a human
+    // curling it needs in order to know WHICH issuer failed and why.
+    if (req.method === 'GET' && req.url === '/ready') {
+      return void assessReadiness(coreCfg).then(
+        (r) => reply(r.ready ? 200 : 503, r),
+        // A PROBE THAT THROWS IS NOT READY. Never let an unexpected failure inside the probe
+        // present as a ready deployment.
+        (e) => reply(503, {
+          ready: false,
+          degraded: true,
+          checkedAt: new Date().toISOString(),
+          reason: `readiness probe failed: ${e instanceof Error ? e.message : String(e)}`,
+          issuers: [],
+        }),
+      );
     }
     if (req.method === 'GET' && req.url === '/version') {
       // ─── WHAT IS RUNNING, ANSWERABLE WITHOUT SHELL ACCESS ─────────────────────────────────
@@ -358,7 +394,7 @@ export async function main(): Promise<Server> {
         ...allowlistReport(coreCfg),
       });
     }
-    if (req.method !== 'POST' || req.url !== '/v1/verify') return void reply(404, { error: 'GET /health, GET /version, POST /v1/verify' });
+    if (req.method !== 'POST' || req.url !== '/v1/verify') return void reply(404, { error: 'GET /health, GET /ready, GET /version, POST /v1/verify' });
 
     // NO AUTHENTICATION. See RATE_MAX above for why, and note what is NOT here: there is no
     // identifier to look a credential up by, so an unauthenticated caller cannot ask this service
