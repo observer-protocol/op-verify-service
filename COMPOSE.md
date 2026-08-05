@@ -98,6 +98,26 @@ Also measured, by pointing both DID hosts at a dead address:
 So the realistic first failure behind a corporate proxy is a **cold** container that boots healthy
 and then refuses every credential. Allowlist the two DID-document hosts above and it works.
 
+> **OPEN QUESTION — what does `healthy` promise? No owner, no action taken.**
+>
+> The `HEALTHCHECK` asks whether the process answers `/health`. On a cold cache behind a blocked
+> proxy that returns **healthy while the service cannot verify anything**, which is a true statement
+> about the process and a misleading one about the deployment. An orchestrator would keep it in
+> rotation; a partner would read green and file the refusals as a credential bug.
+>
+> The two readings are both defensible and the choice is not ours to make silently:
+>
+> - **`healthy` = the process is up.** DID resolvability is a property of the network, not of this
+>   container, and a health check that fails when a third party is unreachable makes an outage
+>   elsewhere look like an outage here. Restarting would fix nothing.
+> - **`healthy` = the deployment can do its job.** A verifier that cannot reach any issuer DID
+>   document is not serving, whatever the socket says.
+>
+> Deliberately unchanged for now. Changing a health contract during a demo week is how a green
+> container starts flapping on someone else's DNS. Recorded here so the next person meets the
+> question rather than the surprise. See the `/health` body, which already reports what was loaded —
+> that is the seam where a readiness signal distinct from liveness would go.
+
 - **No issuance.** Nothing from `observer-protocol-api` or `op-mcp-payment-server` is present, so
   there is no issuance capability to disable — it was never compiled in.
 - **No authentication.** `POST /v1/verify` is open. It takes an artifact as input and retrieves
