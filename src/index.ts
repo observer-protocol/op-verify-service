@@ -7,7 +7,7 @@
 // endpoint is a convenience over code a relying party can run themselves.
 // Verification only: no enforcement, no issuance, no custody.
 
-export { runVerification, decimalToRaw, ISO4217_EXPONENT } from './verify-core.js';
+export { runVerification, decimalToRaw, amountExponent, MAX_AMOUNT_EXPONENT } from './verify-core.js';
 export type { VerifyRequest, VerifyOutcome, ComponentResult, VerifyCoreConfig } from './verify-core.js';
 
 export { createResponseSigner } from './signer.js';

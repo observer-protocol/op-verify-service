@@ -40,13 +40,21 @@ Response (signed; `proposal` optional — omit it for identity+mandate only):
   "agentDid": "...",
   "identity": { "valid": true, "notes": ["DID resolved publicly; mandate subject binds to this DID"] },
   "mandate":  { "valid": true, "id": "...", "issuer": "...", "validUntil": "..." },
-  "scope":    { "inScope": false, "reason": "[ceiling] transaction value exceeds per_transaction_ceiling of 50 USD" },
+  "scope":    { "inScope": false, "evaluated": true, "reason": "[ceiling] transaction value exceeds per_transaction_ceiling of 50 USD" },
   "verifiedAt": "...",
   "proof":    { "type": "DataIntegrityProof", "cryptosuite": "eddsa-jcs-2022", "verificationMethod": "did:web:observerprotocol.org#key-3", "proofValue": "z..." }
 }
 ```
 
-Fail-closed inventory (each is a test): unresolvable DID · mandate not bound to the presented DID · issuer not in the deployment allowlist · expired credential · tampered credential · legacy proof suites rejected · unknown currency · internal error returns everything-invalid, never a silent pass. A stateless deployment carries no spend counters, so velocity/cross-rail-budget mandates fail closed on the scope check with a reason naming that.
+Fail-closed inventory (each is a test): unresolvable DID · mandate not bound to the presented DID · issuer not in the deployment allowlist · expired credential · tampered credential · legacy proof suites rejected · a currency the mandate does not authorise · a malformed amount · internal error returns everything-invalid, never a silent pass. A stateless deployment carries no spend counters, so velocity/cross-rail-budget mandates fail closed on the scope check with a reason naming that.
+
+### `scope.evaluated`, and why `inScope` alone was not enough
+
+`inScope: false` was carrying two different facts: *the mandate's rules were applied and this proposal is outside them*, and *this proposal never reached the mandate's rules*. Only the first is a statement about your proposal. **`evaluated: false` means the second — read it as "not evaluated", never as "out of scope".**
+
+It is false only on this service's own pre-engine refusals: a missing counterparty, a missing currency, an amount that is not a plain non-negative decimal. Once `enforceMandate` runs, `evaluated` is `true` and `reason` is the mandate's own answer — including its same-currency invariant, which denies a USDC transfer against a USD-denominated cap because no FX conversion is performed.
+
+**There is no currency table any more.** There used to be one: fourteen ISO-4217 entries, and any currency not on it failed closed, so *every* USDC proposal returned `inScope: false` at any amount. The minor-unit exponent is now derived from the decimal places in the amount you send, and named back to you in `scope.notes`. Measured before removing it: at exponents 2, 6 and 18 against the same mandate, no amount changed verdict — the exponent only ever decided which amounts were representable. Additive and backward-compatible: `evaluated` is new, `inScope` is unchanged, and both are covered by the response proof.
 
 ## Correlation context (optional, signed)
 

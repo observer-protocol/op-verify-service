@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { generateKeyPairSync, sign as edSign, createHash, verify as edVerify } from 'node:crypto';
 import { runVerification } from '../dist/index.js';
 import { resolveDidKeyDocument, decodeEd25519Multibase, jcsBytes } from '@observer-protocol/policy-engine';
+import { assertDiscriminating } from './_discrimination-guard.mjs';
 
 // ---- did:key + eddsa-jcs-2022 test signer (the sanctioned fixture recipe) ----
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -36,7 +37,7 @@ function signCred(doc, priv, vm) {
 }
 
 const SCHEMA = 'https://observerprotocol.org/schemas/delegation/v2.3.json';
-function makeMandate(principal, agentDid, { validUntil = '2030-01-01T00:00:00Z', ceiling = '50', allow = ['merchant-1'] } = {}) {
+function makeMandate(principal, agentDid, { validUntil = '2030-01-01T00:00:00Z', ceiling = '50', allow = ['merchant-1'], ceilingCurrency = 'USD' } = {}) {
   return signCred({
     '@context': ['https://www.w3.org/ns/credentials/v2'],
     id: 'urn:uuid:arbis-demo-1',
@@ -49,7 +50,7 @@ function makeMandate(principal, agentDid, { validUntil = '2030-01-01T00:00:00Z',
       id: agentDid,
       authorizationLevel: 'policy',
       authorizationConfig: { policy: { policy_id: 'arbis-demo', rail_preference: ['hosted-verify'] } },
-      actionScope: { per_transaction_ceiling: { amount: ceiling, currency: 'USD' } },
+      actionScope: { per_transaction_ceiling: { amount: ceiling, currency: ceilingCurrency } },
       delegationScope: { may_delegate_further: false },
       enforcementMode: 'pre_transaction_check',
       tradingMandate: { counterparty: { allowList: allow } },
@@ -120,9 +121,22 @@ test('fail-closed: expired mandate, unlisted issuer, tampered credential, legacy
   assert.equal(misbound.identity.valid, false);
   assert.match(misbound.identity.reason, /not bound/);
 
+  // A CURRENCY THE MANDATE DOES NOT AUTHORISE STILL FAILS CLOSED, AND THE REASON MOVED ON PURPOSE.
+  //
+  // This asserted /minor-unit exponent/, which pinned the ISO-4217 lookup table as the thing doing
+  // the refusing. That table has been removed: it decided which currencies were EVALUATED AT ALL,
+  // by a list that could not be right, and its miss was reported as `inScope: false` — the same
+  // value a real out-of-scope answer carries. The refusal is now the mandate's own same-currency
+  // invariant, which is the component whose business it is.
+  //
+  // The fail-closed property is unchanged and is what this line still guards. The old assertion is
+  // updated rather than deleted, because a negative case that quietly disappears takes its
+  // coverage with it.
   const badCur = await runVerification(cfg, { agentDid: agent.did, mandate: makeMandate(principal, agent.did), proposal: { counterparty: 'merchant-1', amount: '20', currency: 'DOGE' } });
   assert.equal(badCur.scope?.inScope, false);
-  assert.match(badCur.scope.reason, /minor-unit exponent/);
+  assert.equal(badCur.scope.evaluated, true, 'the engine ran: this is the mandate refusing, not a lookup miss');
+  assert.match(badCur.scope.reason, /same-currency/);
+  assert.doesNotMatch(badCur.scope.reason, /minor-unit exponent/);
 });
 
 test('context: opaque correlation echoed verbatim onto allow AND deny outcomes', async () => {
@@ -497,4 +511,116 @@ test('/version reports the build stamp, and an unstamped build says so rather th
   assert.equal(h.build.commit, v.build.commit);
 
   server.close();
+});
+
+// ─── SCOPE: `inScope: false` USED TO CARRY TWO FACTS, AND NOW IT DOES NOT ─────────────────────
+//
+// The defect: every USDC proposal returned `inScope: false`, at any amount, because the service
+// looked the minor-unit exponent up in a fourteen-entry ISO-4217 table and failed closed on a miss.
+// A check that returns the same answer for every input is not telling you about your input, and a
+// caller reading the boolean could not tell "outside the mandate" from "never asked the mandate".
+//
+// These tests are the control the fix has to survive. Each one requires the harness to produce
+// MORE THAN ONE answer before its answers are worth reading, which is the property the old USDC
+// path could not have satisfied on any fixture.
+
+test('scope: the USD control discriminates, and is unchanged by the exponent fix', async () => {
+  const principal = makeAgent();
+  const agent = makeAgent();
+  const mandate = makeMandate(principal, agent.did);           // ceiling 50 USD
+  const cfg = coreCfg(principal);
+  const at = (amount) => runVerification(cfg, { agentDid: agent.did, mandate, proposal: { counterparty: 'merchant-1', amount, currency: 'USD' } });
+
+  const lo = await at('20.00');
+  const hi = await at('60.00');
+  assert.equal(lo.scope.inScope, true, lo.scope.reason);
+  assert.equal(hi.scope.inScope, false);
+  assert.match(hi.scope.reason, /ceiling/);
+  // BOTH were evaluated. The engine applied the mandate's rules in each case.
+  assert.equal(lo.scope.evaluated, true);
+  assert.equal(hi.scope.evaluated, true);
+
+  // THE REGRESSION GUARD. USD was in the old table at exponent 2, so its verdicts must not have
+  // moved. A currency whose behaviour changed here would mean the removal widened something.
+  assertDiscriminating(
+    [{ name: '20.00', verdict: String(lo.scope.inScope) }, { name: '60.00', verdict: String(hi.scope.inScope) }],
+    { requireVerdicts: ['true', 'false'], axis: 'USD amount against a 50 USD ceiling' },
+  );
+});
+
+test('scope: USDC now varies with its input, which is the whole of the defect', async () => {
+  const principal = makeAgent();
+  const agent = makeAgent();
+  // A USDC-DENOMINATED MANDATE. The old code could not evaluate a USDC proposal against ANY
+  // mandate; this one is the case where the answer should depend on the amount and used not to.
+  const mandate = makeMandate(principal, agent.did, { ceiling: '50', ceilingCurrency: 'USDC' });
+  const cfg = coreCfg(principal);
+  const at = (amount) => runVerification(cfg, { agentDid: agent.did, mandate, proposal: { counterparty: 'merchant-1', amount, currency: 'USDC' } });
+
+  const lo = await at('20.00');
+  const hi = await at('60.00');
+  const tiny = await at('0.000001');            // six decimal places: unrepresentable under the old exponent-2 table
+
+  assert.equal(lo.scope.inScope, true, lo.scope.reason);
+  assert.equal(hi.scope.inScope, false, 'a USDC amount over the cap must deny');
+  assert.equal(tiny.scope.inScope, true, tiny.scope.reason);
+  for (const r of [lo, hi, tiny]) assert.equal(r.scope.evaluated, true);
+
+  // The exponent is derived from the caller's amount and named in the answer.
+  assert.match(tiny.scope.notes.join(' '), /scaled at 10\^6/);
+  assert.match(lo.scope.notes.join(' '), /scaled at 10\^2/);
+
+  assertDiscriminating(
+    [{ name: '20.00', verdict: String(lo.scope.inScope) },
+     { name: '60.00', verdict: String(hi.scope.inScope) },
+     { name: '0.000001', verdict: String(tiny.scope.inScope) }],
+    { requireVerdicts: ['true', 'false'], axis: 'USDC amount against a 50 USDC ceiling' },
+  );
+});
+
+test('scope: a currency the MANDATE does not authorise is refused by the mandate, not by a table', async () => {
+  const principal = makeAgent();
+  const agent = makeAgent();
+  const mandate = makeMandate(principal, agent.did);           // ceiling 50 USD
+  const cfg = coreCfg(principal);
+  // Constant false across three orders of magnitude, and CORRECTLY so: the cap is denominated in
+  // USD and no FX conversion is performed. What matters is that the refusal now comes from the
+  // mandate's own same-currency invariant with evaluated:true, rather than from a lookup miss.
+  const out = [];
+  for (const amount of ['1.00', '20.00', '1000000.00']) {
+    out.push(await runVerification(cfg, { agentDid: agent.did, mandate, proposal: { counterparty: 'merchant-1', amount, currency: 'USDC' } }));
+  }
+  for (const r of out) {
+    assert.equal(r.scope.inScope, false);
+    assert.equal(r.scope.evaluated, true, 'the engine ran; this is the mandate answering');
+    assert.doesNotMatch(r.scope.reason, /minor-unit exponent/, 'the exponent table must not be the reason any more');
+  }
+});
+
+test('scope: what is genuinely NOT EVALUATED says so, and can never read as out of scope', async () => {
+  const principal = makeAgent();
+  const agent = makeAgent();
+  const mandate = makeMandate(principal, agent.did);
+  const cfg = coreCfg(principal);
+  const cases = [
+    ['no counterparty',        { counterparty: '',         amount: '20.00',  currency: 'USD' }, /no counterparty/],
+    ['no currency',            { counterparty: 'merchant-1', amount: '20.00', currency: '' },   /no currency/],
+    ['amount is not a decimal',{ counterparty: 'merchant-1', amount: '20,00', currency: 'USD' },/not a plain non-negative decimal/],
+    ['amount is negative',     { counterparty: 'merchant-1', amount: '-20.00',currency: 'USD' },/not a plain non-negative decimal/],
+    ['amount in exponent form',{ counterparty: 'merchant-1', amount: '2e1',   currency: 'USD' },/not a plain non-negative decimal/],
+  ];
+  for (const [label, proposal, expected] of cases) {
+    const r = await runVerification(cfg, { agentDid: agent.did, mandate, proposal });
+    assert.equal(r.scope.inScope, false, label);
+    assert.equal(r.scope.evaluated, false, `${label}: the mandate's rules were never applied, so evaluated must be false`);
+    assert.match(r.scope.reason, expected, label);
+    assert.match(r.scope.reason, /not evaluated/, `${label}: the reason must say so in words, not only in a boolean`);
+  }
+
+  // AND THE PAIRING IS DISCRIMINATING: the same field is true on a path that did reach the engine.
+  const evaluated = await runVerification(cfg, { agentDid: agent.did, mandate, proposal: { counterparty: 'merchant-1', amount: '20.00', currency: 'USD' } });
+  assertDiscriminating(
+    [{ name: 'malformed', verdict: String(false) }, { name: 'evaluated', verdict: String(evaluated.scope.evaluated) }],
+    { requireVerdicts: ['true', 'false'], axis: 'scope.evaluated' },
+  );
 });
