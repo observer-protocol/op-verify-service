@@ -23,7 +23,7 @@ the per-issuer state and the underlying failure in the body. This is the endpoin
 "your credential is bad" from "this deployment cannot reach the issuer". A `ready: true` carrying
 `degraded: true` means resolvable, not reachable. See COMPOSE.md for the full contract.
 
-`POST /v1/verify` — `Authorization: Bearer <partner token>`
+`POST /v1/verify` — no authentication. Rate limited to 60/min per caller and 600/min overall.
 
 ```json
 {
@@ -127,13 +127,24 @@ It is **echoed verbatim into the response and covered by the response proof**, s
 Stateless by construction, and verifiable on the box:
 
 - **No request bodies, mandates, headers, or verdicts are written to any persistent log.** There is no decisions/audit sink: the engine's audit path is directed at a per-request temp dir removed before the response returns. The service logs one startup line and nothing per-request (no access log; raw `node:http`, no framework).
-- **Unauthenticated requests write nothing at all** — the body is never read or parsed before the `401`.
 - The mandate touches disk only as a `0600` file inside the service's `PrivateTmp` namespace, solely to feed the engine's file-based `verifyCredential`, and is removed in a `finally` before responding. It never persists; `PrivateTmp` wipes it on restart regardless.
-- The only file the service persists is a cache of **public** DID documents / status lists under `OP_VERIFY_CACHE_DIR`.
+- The only files the service persists are cached **public** DID documents and status lists under
+  `OP_VERIFY_CACHE_DIR`. **What is cached is chosen by requests, so the set of files is also a record
+  of which agents callers asked about.** Verifying a mandate resolves its agent DID, and a resolvable
+  `did:web` agent leaves one file naming that DID and the time it was last resolved. It holds no
+  mandate, no proposal, no verdict and no caller identity, it is public material either way, and
+  nothing deletes an entry — so the set accumulates for the life of the deployment. A `did:key` agent
+  resolves inline and leaves nothing at all.
 
-## Access is fail-closed by default
+## Access was fail-closed by a bearer token until 3 August 2026 — RETIRED
 
-No configuration grants access when credentials are absent. If `OP_VERIFY_BEARER_TOKENS` is empty or unset, the token list is empty and **every** `/v1/verify` request returns `401` — an arbitrary token, an empty bearer, and a missing `Authorization` header all deny. There is no code path where "no tokens configured" authenticates a caller: `tokenOk` is `tokens.some(...)`, which is `false` over an empty list. Verified in code and by live probe. A deployment with no tokens boots healthy and denies all, and emits a startup warning saying so — a lost env file is visible at boot rather than surfacing later as a partner's mystery `401` while `/health` is green.
+This section described `OP_VERIFY_BEARER_TOKENS` and a `401` for every caller without a token. **That
+gate no longer exists**: `/v1/verify` is open, and the rationale is under "Verification is open"
+below. It is recorded as retired rather than deleted, because a control that vanishes from the
+documentation reads as one that was never there.
+
+A leftover `OP_VERIFY_BEARER_TOKENS` in a deployment's env file gates nothing. The service warns about
+exactly that at startup.
 
 ## Identity, precisely
 
