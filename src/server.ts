@@ -1,19 +1,21 @@
-// The hosted surface: POST /v1/verify, bearer-authenticated, rate-limited,
+// The hosted surface: POST /v1/verify, OPEN (no authentication), rate-limited,
 // fail-closed. One network call in, one signed JSON response out. Binds
 // localhost by default — public exposure is the tunnel's job.
+//
+// It read "bearer-authenticated" until 2026-08-09, six days after the bearer gate was removed.
 //
 // Env (all required unless noted):
 //   OP_VERIFY_SIGNING_KEY_PATH   PKCS8 PEM, Ed25519 (e.g. /etc/observer-protocol/keys/key-3.pem)
 //   OP_VERIFY_SIGNING_VM         e.g. did:web:observerprotocol.org#key-3
 //   OP_VERIFY_ISSUER_ALLOWLIST   comma-separated issuer DIDs accepted for mandates
 //   OP_VERIFY_SCHEMA_ALLOWLIST   comma-separated credentialSchema ids (frozen URLs)
-//   OP_VERIFY_BEARER_TOKENS      comma-separated partner tokens (issued manually)
+//   OP_VERIFY_BEARER_TOKENS      UNREAD. Nothing authenticates with it; parsed only to warn at
+//                                boot that a value left here gates nothing.
 //   OP_VERIFY_CACHE_DIR          cache dir (DID docs, status lists) — public material only
 //   PORT                         default 8091
 //   HOST                         default 127.0.0.1
 
 import { createServer, type Server } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -25,11 +27,13 @@ import { createResponseSigner, type ResponseSigner } from './signer.js';
 import * as engineExports from '@observer-protocol/policy-engine';
 
 /**
- * The engine floor this service may serve authenticated traffic on.
+ * The engine floor this service may serve on. (It read "serve AUTHENTICATED traffic on" until
+ * 2026-08-09; there is no authenticated traffic, there is only traffic.)
  *
- * THE INTERLOCK. "No bearer token is minted until the pin moves" was a note,
- * and a note is not a control. This makes it mechanical: with tokens present
- * and the bundled engine below this floor, the service refuses to start.
+ * THE INTERLOCK. "No bearer token is minted until the pin moves" was a note, and a note is not a
+ * control. This makes it mechanical: below this floor, the service refuses to start. The original
+ * form was conditional on a token existing, which would have disarmed it permanently once the
+ * endpoint opened — see assertEngineFloor.
  *
  * THE FLOOR IS NOT THE PIN. The dependency is pinned at ^1.0.0-rc.10 (npm
  * `latest`); this gate is set at 0.3.0, the BEHAVIOUR boundary.
@@ -74,8 +78,8 @@ import * as engineExports from '@observer-protocol/policy-engine';
  * credentialSubject.delegation.scope.spending_limits.per_rail, which is where
  * /sovereign/delegate, /sovereign/claim and the enterprise issue-delegation
  * modal put EVERY cap. Against a mandate capped at 100, 0.2.0 returns a SIGNED
- * inScope:true for a payment of 1,000,000. Minting a bearer token is the single
- * action that makes that reachable by an external relying party.
+ * inScope:true for a payment of 1,000,000. That was reachable by minting a bearer token when this
+ * was written; since 2026-08-09 it is reachable by anyone, which is why the gate is unconditional.
  */
 export const MIN_ENGINE_VERSION = '0.3.0';
 
@@ -128,11 +132,13 @@ function installedEngineVersion(): string | null {
 }
 
 /**
- * Refuse to serve authenticated traffic on an engine below the floor.
+ * Refuse to serve on an engine below the floor.
  *
- * No tokens configured is fine at any engine version: the service answers 401
- * to everyone, which is the correct fail-closed state. The gate only bites when
- * a token exists, because that is the moment a real caller can get a verdict.
+ * The paragraph that stood here described a token gate: "no tokens configured is fine at any engine
+ * version: the service answers 401 to everyone... the gate only bites when a token exists." That was
+ * true until 3 August 2026 and has been wrong since. There is no 401 and no token check; every
+ * request is served, so the floor is checked unconditionally. The body below says so at the point it
+ * happens.
  *
  * An UNDETERMINABLE version is treated as below the floor. Unknown is a failure
  * state, not a pass — serving on an engine we cannot identify is the thing this
@@ -283,14 +289,20 @@ function callerKey(req: { headers: Record<string, string | string[] | undefined>
   return `sock:${req.socket.remoteAddress ?? 'unknown'}`;
 }
 
-function tokenOk(header: string | undefined, tokens: string[]): boolean {
-  if (!header?.startsWith('Bearer ')) return false;
-  const presented = Buffer.from(header.slice(7));
-  return tokens.some((t) => {
-    const expected = Buffer.from(t);
-    return expected.length === presented.length && timingSafeEqual(expected, presented);
-  });
-}
+// ─── `tokenOk` WAS HERE, AND IT WAS DELETED FOR WHAT IT WAS PROPPING UP ───────────────────────
+//
+// It compared a Bearer header against OP_VERIFY_BEARER_TOKENS in constant time. It was correct, and
+// it had been CALLED ZERO TIMES since verification was opened on 3 August 2026.
+//
+// DO NOT RESTORE IT AS DEAD-BUT-HARMLESS. It was not harmless. The README claimed "unauthenticated
+// requests write nothing at all — the body is never read or parsed before the 401", which stopped
+// being true when the 401 stopped existing. The verification any careful reader performs for that
+// sentence is "is there a token check in this service?" — and this function answered yes. The claim
+// was false and confirmed by exactly the check that should have caught it.
+//
+// A surviving artifact of removed behaviour does not merely fail to disprove a stale claim; it
+// supplies evidence FOR it. If a token gate is ever wanted again, the endpoint's posture is the
+// decision and this function is the last part of it, not the first.
 
 let globalWindow: { count: number; windowStart: number } | undefined;
 
@@ -307,15 +319,12 @@ export async function main(): Promise<Server> {
     cacheDir: env('OP_VERIFY_CACHE_DIR'),
     ...(process.env.OP_VERIFY_OFFLINE_DIDDOC ? { offlineDidDocumentPath: process.env.OP_VERIFY_OFFLINE_DIDDOC } : {}),
   };
-  // Deliberately optional and allowed-empty: a deployment with no partner
-  // tokens yet answers 401 to everyone, which is the correct fail-closed
-  // state until a token is minted. Never a boot failure.
+  // READ ONLY SO IT CAN BE WARNED ABOUT. Nothing authenticates with these.
   //
-  // MINT SITE. Setting OP_VERIFY_BEARER_TOKENS is what turns this service from
-  // "denies everyone" into "answers a real partner". Its precondition is the
-  // engine pin: see MIN_ENGINE_VERSION above. assertEngineFloor enforces that
-  // mechanically on the next line, so a token added here against an old engine
-  // stops the service rather than serving verdicts from it.
+  // This described a MINT SITE: setting OP_VERIFY_BEARER_TOKENS was "what turns this service from
+  // denies-everyone into answers-a-real-partner". That has been false since 3 August 2026. The value
+  // is parsed for exactly one purpose — the startup warning below, which tells an operator that a
+  // token still sitting in their env file gates nothing.
   const tokens = (process.env.OP_VERIFY_BEARER_TOKENS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   assertEngineFloor();
   const rate = new Map<string, { count: number; windowStart: number }>();
