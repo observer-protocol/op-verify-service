@@ -72,6 +72,38 @@ Two consequences worth stating because you may meet them:
   structure gate two checks earlier. Its own documentation points at
   `api.observerprotocol.org/verify/delegation`, which is a different implementation.
 
+### A note this service passes through cannot tell you whether your credential conforms
+
+When a credential carries no `credentialStatus`, the verdict comes back **valid**, with this note:
+
+```
+credential carries no credentialStatus entry — revocation not checkable for this credential
+```
+
+**That note is byte-identical whether or not the schema your credential cites requires the field.**
+Measured on engine 1.0.0-rc.10 against two credentials identical in every respect except the version
+in `credentialSchema.id`:
+
+| cites | schema requires `credentialStatus` | verdict | note |
+|---|---|---|---|
+| `v2.4` | no | valid | the line above |
+| `v2.7` | **yes** | valid | **identical** |
+
+The delegation schemas put `credentialStatus` in `required` from **v2.5 onward**, and v2.5, v2.6 and
+v2.7 are all on this deployment's accepted list. So **a credential can verify here while failing the
+schema it cites**, and the only signal you get says the same thing as the case where nothing is wrong.
+
+**Read that note as "revocation was not checked", never as "your credential is fine."** If your
+credential cites v2.5 or later and carries no `credentialStatus`, it is non-conformant and
+permanently unrevocable, and nothing in this response will tell you so.
+
+**This is not a limit of the hosted deployment**, and running your own verifier does not avoid it: the
+check lives in the engine's `validateStructure`, which tests only that `credentialStatus` is an array
+when present. This service passes the engine's note through verbatim and adds nothing. Recorded here
+because this is where a caller meets it. See
+`op-at-specs/2026-08-09-spec-requires-what-the-implementation-does-not-do.md` for the estate-wide
+measurement, including that **zero credentials estate-wide carry a `credentialStatus` at all**.
+
 ### `scope.evaluated`, and why `inScope` alone was not enough
 
 `inScope: false` was carrying two different facts: *the mandate's rules were applied and this proposal is outside them*, and *this proposal never reached the mandate's rules*. Only the first is a statement about your proposal. **`evaluated: false` means the second — read it as "not evaluated", never as "out of scope".**
