@@ -48,6 +48,30 @@ Response (signed; `proposal` optional — omit it for identity+mandate only):
 
 Fail-closed inventory (each is a test): unresolvable DID · mandate not bound to the presented DID · issuer not in the deployment allowlist · expired credential · tampered credential · legacy proof suites rejected · a currency the mandate does not authorise · a malformed amount · internal error returns everything-invalid, never a silent pass. A stateless deployment carries no spend counters, so velocity/cross-rail-budget mandates fail closed on the scope check with a reason naming that.
 
+### Revocation: a status list must be served from the issuer's own origin
+
+A credential's `credentialStatus[].statusListCredential` is a URL chosen by whoever signed the
+credential, and every verifier that reads the credential dials it. **This service dereferences it
+only when its origin is the same as the `did:web` issuer's own domain.** Anything else is refused,
+before any request leaves the process, with a reason naming the origin and the pinned one.
+
+**That refusal is the control working, not a fault in your credential.** It is what stops a
+credential from a trusted issuer steering a public verifier at an address of its choosing. The
+allowlist that would permit an off-origin list is empty here and is deliberately not configurable by
+environment: it is the one list on this service that is a security control rather than a version
+list, and a value with no reviewable record behind it is not one.
+
+Two consequences worth stating because you may meet them:
+
+- **A status list served from a CDN or object store on a different hostname is refused**, even though
+  that is a normal way to serve a static file. Host it on the issuer's domain, or run your own
+  verifier, where the allowlist is yours to set.
+- **Observer Protocol's own clause-zero revocation demonstration does not verify here**, and has
+  never verified here. Its status list is cross-origin, but that is not what stops it: it emits
+  `credentialStatus` as a single object where the engine requires an array, so it is refused at the
+  structure gate two checks earlier. Its own documentation points at
+  `api.observerprotocol.org/verify/delegation`, which is a different implementation.
+
 ### `scope.evaluated`, and why `inScope` alone was not enough
 
 `inScope: false` was carrying two different facts: *the mandate's rules were applied and this proposal is outside them*, and *this proposal never reached the mandate's rules*. Only the first is a statement about your proposal. **`evaluated: false` means the second — read it as "not evaluated", never as "out of scope".**
