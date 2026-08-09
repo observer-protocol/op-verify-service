@@ -31,8 +31,8 @@ import * as engineExports from '@observer-protocol/policy-engine';
  * and a note is not a control. This makes it mechanical: with tokens present
  * and the bundled engine below this floor, the service refuses to start.
  *
- * THE FLOOR IS NOT THE PIN. The dependency is pinned at ^0.3.3 (newest, and
- * what the adapters run); this gate is set at 0.3.0, the BEHAVIOUR boundary.
+ * THE FLOOR IS NOT THE PIN. The dependency is pinned at ^1.0.0-rc.10 (npm
+ * `latest`); this gate is set at 0.3.0, the BEHAVIOUR boundary.
  * 0.3.0 is where both relevant changes landed: e64b8ef "read + enforce
  * delegation.scope.spending_limits.per_rail" and 7337f61 "fail closed on
  * unrecognized mandate shape", both 2026-07-15, both recorded under 0.3.0 in
@@ -44,6 +44,29 @@ import * as engineExports from '@observer-protocol/policy-engine';
  * 0.3.x must not trip a gate it has no business tripping. A floor set to the
  * pin would do exactly that.
  *
+ * ─── DO NOT RAISE THIS TO A 1.0.0-rc.x VALUE. IT WOULD DISARM THE GATE. ────────────────────
+ *
+ * The pin moved 0.3.3 -> 1.0.0-rc.10 on 2026-08-09, and the obvious next move is to raise this
+ * floor to match. It must not be raised to any prerelease value, because cmpVersion prefers the
+ * engine's own compareCoreVersion and that function cannot compare prerelease identifiers.
+ * Measured against 1.0.0-rc.10 on 2026-08-09:
+ *
+ *     compareCoreVersion('1.0.0-rc.10', '0.3.0')       =  1    <- the only one that discriminates
+ *     compareCoreVersion('1.0.0-rc.2',  '1.0.0-rc.10') =  0
+ *     compareCoreVersion('1.0.0-rc.10', '1.0.0')       =  0
+ *
+ * With the floor at a 1.0.0-rc.x value every engine in the rc line compares EQUAL to it, and
+ * `cmpVersion(found, MIN) < 0` is never true. The gate would run, return, and refuse nothing —
+ * including an rc.2 that predates the outbound-fetch guard this upgrade exists to acquire.
+ *
+ * The floor stays at 0.3.0 because 0.3.0 is still the behaviour boundary it was set for, and
+ * because it is a release value the comparator can actually order. If a behaviour boundary ever
+ * lands inside the 1.0.0-rc line, the comparator must be fixed in the engine BEFORE this constant
+ * moves — the local fallback below has the same defect, since it parses '0-rc' as 0.
+ *
+ * The test `engine floor: the comparator can order the configured floor` pins this: it fails if
+ * MIN_ENGINE_VERSION is set to a value the comparator cannot discriminate.
+ *
  * Do NOT reuse LEDGER_SAFE_FLOOR ('0.3.2'). It is a different floor for a
  * different property.
  *
@@ -54,7 +77,7 @@ import * as engineExports from '@observer-protocol/policy-engine';
  * inScope:true for a payment of 1,000,000. Minting a bearer token is the single
  * action that makes that reachable by an external relying party.
  */
-const MIN_ENGINE_VERSION = '0.3.0';
+export const MIN_ENGINE_VERSION = '0.3.0';
 
 /**
  * Compare two versions, preferring the engine's own exported comparator.
@@ -64,7 +87,7 @@ const MIN_ENGINE_VERSION = '0.3.0';
  * So the local fallback is not a hand-rolled duplicate of a shipped function,
  * it is the path taken precisely when the shipped function cannot exist.
  */
-function cmpVersion(a: string, b: string): number {
+export function cmpVersion(a: string, b: string): number {
   const engineCmp = (engineExports as { compareCoreVersion?: (x: string, y: string) => number })
     ?.compareCoreVersion;
   if (typeof engineCmp === 'function') return engineCmp(a, b);
