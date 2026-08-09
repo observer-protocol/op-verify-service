@@ -26,7 +26,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@observer-protocol/policy-engine": "^0.3.3"
+    "@observer-protocol/policy-engine": "^1.0.0-rc.10"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

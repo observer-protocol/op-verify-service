@@ -18,11 +18,48 @@ import {
 } from '@observer-protocol/policy-engine';
 import type { ObserverDelegationCredential, PolicyContext, ResolvedTransfer, VerifierConfig } from '@observer-protocol/policy-engine';
 
-/** ISO-4217 minor-unit exponents. Unlisted currency -> fail closed. */
-export const ISO4217_EXPONENT: Record<string, number> = {
-  USD: 2, EUR: 2, GBP: 2, CHF: 2, CAD: 2, AUD: 2, MXN: 2, BRL: 2, SGD: 2, HKD: 2,
-  JPY: 0, KRW: 0, BHD: 3, KWD: 3,
-};
+/**
+ * The largest fraction this service will scale. A bound, not a currency opinion.
+ *
+ * There is no minor-unit table here any more, and its removal is the fix for a real defect rather
+ * than a simplification. WHAT THE TABLE WAS: fourteen ISO-4217 currencies, with an unlisted
+ * currency failing closed. Every USDC proposal therefore returned `inScope: false` regardless of
+ * amount, which is a check that does not vary with the input it claims to be about.
+ *
+ * WHY REPLACING IT DOES NOT WIDEN ANYTHING. The exponent is a representation detail that cancels:
+ * the scaled amount and the rail's `decimals` move together, and the engine compares a notional
+ * against the mandate's cap. Measured 2026-08-09 against a USDC-denominated mandate capped at 10,
+ * at exponents 2, 6 and 18: 1.00, 9.99 and 10.00 allow at every exponent; 10.01 and 1000000.00 deny
+ * at every exponent. The exponent changed no verdict. Its only effect was which amounts were
+ * REPRESENTABLE — at exponent 2, "0.000001" was rejected as over-precise and that rejection was
+ * reported as `inScope: false`.
+ *
+ * So the table never carried authority. It decided which currencies got evaluated at all, and it
+ * decided that by a list that could not be right: USDC is not ISO-4217 and never will be, and
+ * USDT's decimals are chain-dependent (6 on Ethereum and Tron, 18 on BSC), so no single entry for
+ * it would be correct everywhere. Deriving the exponent from the amount the caller actually wrote
+ * removes the question instead of answering it wrongly.
+ *
+ * A proposal in a currency the MANDATE does not authorise is still refused, and by the component
+ * that should refuse it: the engine's same-currency invariant, which denies a USDC transfer against
+ * a USD-denominated cap because no FX conversion is performed. That refusal is the mandate talking.
+ * The old one was a gap in a lookup table talking.
+ */
+export const MAX_AMOUNT_EXPONENT = 30;
+
+/**
+ * The number of decimal places an amount string carries, or null if it is not a plain
+ * non-negative decimal. Deliberately strict: no sign, no exponent notation, no separators,
+ * no whitespace beyond the trim. An amount this cannot read is not scaled to something
+ * plausible, it is refused as unevaluated.
+ */
+export function amountExponent(amount: string): number | null {
+  if (typeof amount !== 'string') return null;
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(amount.trim());
+  if (!m) return null;
+  const frac = (m[2] ?? '').length;
+  return frac <= MAX_AMOUNT_EXPONENT ? frac : null;
+}
 
 export interface VerifyRequest {
   /** The agent's DID (did:web or did:key). */
@@ -54,8 +91,22 @@ export interface VerifyOutcome {
   agentDid: string;
   identity: ComponentResult;
   mandate: ComponentResult & { id?: string; issuer?: string; validUntil?: string };
-  /** Present only when a proposal was submitted AND the mandate verified. */
-  scope?: { inScope: boolean; reason?: string; notes?: string[] };
+  /** Present only when a proposal was submitted AND the mandate verified.
+   *
+   * `evaluated` EXISTS BECAUSE `inScope: false` WAS CARRYING TWO DIFFERENT FACTS. It meant both
+   * "the mandate's rules were applied to this proposal and it is outside them" and "this proposal
+   * never reached the mandate's rules", and a caller reading the boolean could not tell which. The
+   * second is not a statement about the proposal at all. Read `inScope: false` with
+   * `evaluated: false` as "not evaluated", never as "out of scope".
+   *
+   * `evaluated` is true exactly when `enforceMandate` ran and returned a verdict. It is a claim
+   * about THIS service reaching the engine, not a re-interpretation of what the engine then said:
+   * when the engine declines to establish scope (its same-currency invariant, for instance) it says
+   * so in `reason`, and that refusal is the mandate's answer rather than a gap in this service.
+   *
+   * Additive and backward-compatible: the field is new, `inScope` is unchanged, and both are
+   * covered by the response proof. */
+  scope?: { inScope: boolean; evaluated: boolean; reason?: string; notes?: string[] };
   verifiedAt: string;
   /** Present only when the request carried `context`: the caller's opaque
    * correlation object, echoed verbatim and covered by the response proof. */
@@ -179,18 +230,36 @@ export async function runVerification(cfg: VerifyCoreConfig, req: VerifyRequest)
   // not have is never treated as zero.
   if (req.proposal && cred) {
     const { counterparty, amount, currency } = req.proposal;
-    const exp = ISO4217_EXPONENT[currency];
+    // EVERY REFUSAL BEFORE enforceMandate CARRIES evaluated:false. These are the paths on which
+    // the mandate's rules were never applied, so a `false` here is not a statement about the
+    // proposal being outside the mandate. It is this service saying it could not ask.
     if (typeof counterparty !== 'string' || counterparty.length === 0) {
-      out.scope = { inScope: false, reason: 'proposal carries no counterparty' };
+      out.scope = { inScope: false, evaluated: false, reason: 'proposal carries no counterparty — not evaluated' };
       return out;
     }
-    if (exp === undefined) {
-      out.scope = { inScope: false, reason: `currency ${JSON.stringify(currency)} has no known minor-unit exponent — amount cannot be scaled (fail closed)` };
+    if (typeof currency !== 'string' || currency.length === 0) {
+      out.scope = { inScope: false, evaluated: false, reason: 'proposal carries no currency — not evaluated' };
+      return out;
+    }
+    // The exponent comes from the amount the caller wrote, not from a table of currencies. See
+    // MAX_AMOUNT_EXPONENT above for why that is a removal of a wrong mechanism rather than a
+    // loosening: measured, the exponent changes no verdict.
+    const exp = amountExponent(amount);
+    if (exp === null) {
+      out.scope = {
+        inScope: false,
+        evaluated: false,
+        reason:
+          `amount ${JSON.stringify(amount)} is not a plain non-negative decimal with at most ` +
+          `${MAX_AMOUNT_EXPONENT} decimal places — not evaluated (fail closed)`,
+      };
       return out;
     }
     const raw = decimalToRaw(amount, exp);
     if (raw === null) {
-      out.scope = { inScope: false, reason: `amount ${JSON.stringify(amount)} is not a valid ${currency} decimal (fail closed)` };
+      // Unreachable via amountExponent, which has already accepted the shape. Kept because a
+      // fail-closed branch that cannot be reached is cheaper than a null that reaches BigInt.
+      out.scope = { inScope: false, evaluated: false, reason: `amount ${JSON.stringify(amount)} could not be scaled — not evaluated (fail closed)` };
       return out;
     }
     const railId = 'hosted-verify';
@@ -215,7 +284,20 @@ export async function runVerification(cfg: VerifyCoreConfig, req: VerifyRequest)
       timestamp: verifiedAt,
     };
     const verdict = enforceMandate(ctx, cred, config, resolved);
-    out.scope = { inScope: verdict.allow, ...(verdict.reason ? { reason: verdict.reason } : {}), notes: verdict.notes };
+    // The engine ran and answered, so the mandate's rules WERE applied. Whatever it decided,
+    // including a refusal to establish scope across currencies, is the mandate's answer and is
+    // carried through verbatim in `reason`.
+    out.scope = {
+      inScope: verdict.allow,
+      evaluated: true,
+      ...(verdict.reason ? { reason: verdict.reason } : {}),
+      notes: [
+        // NAME THE ASSUMPTION IN THE ANSWER. The exponent is derived from the caller's own amount,
+        // and a caller comparing two verdicts should be able to see that rather than infer it.
+        `amount scaled at 10^${exp}, derived from the ${exp} decimal place(s) in ${JSON.stringify(amount)}`,
+        ...(verdict.notes ?? []),
+      ],
+    };
   }
   return out;
 }
